@@ -1,0 +1,960 @@
+'use client';
+
+import React, { useState, useEffect } from 'react';
+import { Calendar as CalendarIcon, ChevronDown, Plus, Trash2, Waves, Loader2, Edit3, Download } from 'lucide-react';
+import Link from 'next/link';
+import { useParams, useRouter } from 'next/navigation';
+import { toast } from 'sonner';
+import { format, parse } from 'date-fns';
+
+import { Select, SelectContent, SelectGroup, SelectItem, SelectLabel, SelectScrollDownButton, SelectScrollUpButton, SelectSeparator, SelectTrigger, SelectValue } from "@/components/ui/select";
+import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
+import { Calendar } from "@/components/ui/calendar";
+import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter } from "@/components/ui/dialog";
+import { Command, CommandInput, CommandList, CommandEmpty, CommandGroup, CommandItem } from "@/components/ui/command";
+import { Badge } from "@/components/ui/badge";
+import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip";
+import { cn } from "@/lib/utils";
+import { Search, AlertTriangle } from 'lucide-react';
+
+import { waitForPurchaseInvoicePreview, PurchaseInvoicePreviewPayload, PurchaseInvoicePreviewDetail, getCreditorOptions, getAgentOptions, getStockOptions } from '../../../../lib/purchase-invoice-create-api';
+import { submitPurchaseInvoice, PurchaseInvoiceSubmitRequest, waitForPurchaseInvoiceSubmit } from '../../../../lib/purchase-invoice-submit-api';
+
+export default function PurchaseInvoiceTaskPage() {
+  const params = useParams();
+  const router = useRouter();
+  const taskId = params.taskId as string;
+
+  const [loading, setLoading] = useState(true);
+  const [submitting, setSubmitting] = useState(false);
+  const [payload, setPayload] = useState<PurchaseInvoicePreviewPayload | null>(null);
+  const [editingItemIndex, setEditingItemIndex] = useState<number | null>(null);
+  const [warnings, setWarnings] = useState<any[]>([]);
+
+  // Search/Picker states
+  const [creditorOptions, setCreditorOptions] = useState<any[]>([]);
+  const [agentOptions, setAgentOptions] = useState<any[]>([]);
+  const [stockOptions, setStockOptions] = useState<any[]>([]);
+  
+  const [creditorSearch, setCreditorSearch] = useState("");
+  const [agentSearch, setAgentSearch] = useState("");
+  const [stockSearch, setStockSearch] = useState("");
+  
+  const [isCreditorLoading, setIsCreditorLoading] = useState(false);
+  const [isAgentLoading, setIsAgentLoading] = useState(false);
+  const [isStockLoading, setIsStockLoading] = useState(false);
+  
+  const [isCreditorOpen, setIsCreditorOpen] = useState(false);
+  const [isAgentOpen, setIsAgentOpen] = useState(false);
+  const [activeStockIdx, setActiveStockIdx] = useState<number | null>(null);
+
+  useEffect(() => {
+    if (!taskId) return;
+    
+    let isMounted = true;
+    waitForPurchaseInvoicePreview(taskId, 'invoice')
+      .then((res: any) => {
+        if (isMounted) {
+          setPayload(res.payload);
+          // Safely set warnings, handling both strings or objects
+          setWarnings(res.warnings || []);
+          setLoading(false);
+        }
+      })
+      .catch((err) => {
+        if (isMounted) {
+          toast.error(err.message || 'Failed to load preview');
+          setLoading(false);
+        }
+      });
+    return () => { isMounted = false; };
+  }, [taskId]);
+
+  useEffect(() => {
+    const fetchOptions = async () => {
+      if (!creditorSearch) {
+        setCreditorOptions([]);
+        return;
+      }
+      setIsCreditorLoading(true);
+      try {
+        const res = await getCreditorOptions({ search: creditorSearch, pageSize: 20 });
+        setCreditorOptions(res.items || []);
+      } catch (error) {
+        console.error('Creditor options error:', error);
+      } finally {
+        setIsCreditorLoading(false);
+      }
+    };
+    const timer = setTimeout(fetchOptions, 300);
+    return () => clearTimeout(timer);
+  }, [creditorSearch]);
+
+  useEffect(() => {
+    const fetchOptions = async () => {
+      if (!agentSearch) {
+        setAgentOptions([]);
+        return;
+      }
+      setIsAgentLoading(true);
+      try {
+        const res = await getAgentOptions({ search: agentSearch, pageSize: 20 });
+        setAgentOptions(res.items || []);
+      } catch (error) {
+        console.error('Agent options error:', error);
+      } finally {
+        setIsAgentLoading(false);
+      }
+    };
+    const timer = setTimeout(fetchOptions, 300);
+    return () => clearTimeout(timer);
+  }, [agentSearch]);
+
+  useEffect(() => {
+    const fetchOptions = async () => {
+      if (!stockSearch) {
+        setStockOptions([]);
+        return;
+      }
+      setIsStockLoading(true);
+      try {
+        const res = await getStockOptions({ search: stockSearch, pageSize: 20 });
+        setStockOptions(res.items || []);
+      } catch (error) {
+        console.error('Stock options error:', error);
+      } finally {
+        setIsStockLoading(false);
+      }
+    };
+    const timer = setTimeout(fetchOptions, 300);
+    return () => clearTimeout(timer);
+  }, [stockSearch]);
+
+  const checkWarning = (code: string, line?: number) => {
+    const isGlobal = line === undefined || line === -1;
+    return warnings.find(w => {
+      // if warning is object
+      if (typeof w === 'object' && w !== null) {
+        if (!w.code.includes(code)) return false;
+        if (!isGlobal && w.line !== line) return false;
+        return true;
+      }
+      // if warning is string
+      if (typeof w === 'string') {
+        if (!isGlobal) return w.includes(code) && w.includes(String(line));
+        return w.includes(code);
+      }
+      return false;
+    });
+  };
+
+  const removeWarning = (codes: string[], line?: number) => {
+    const isGlobal = line === undefined || line === -1;
+    setWarnings(prev => prev.filter(w => {
+      if (typeof w === 'object' && w !== null) {
+        if (codes.includes(w.code)) {
+          if (!isGlobal && w.line === line) return false;
+          if (isGlobal) return false;
+        }
+        return true;
+      }
+      if (typeof w === 'string') {
+        return !codes.some(c => !isGlobal ? (w.includes(c) && w.includes(String(line))) : w.includes(c));
+      }
+      return true;
+    }));
+  };
+
+  const FieldWarning = ({ code, line, customMsg }: { code: string, line?: number, customMsg?: string }) => {
+    const warning = checkWarning(code, line);
+    if (!warning) return null;
+    const msg = customMsg || (typeof warning === 'object' ? warning.message : warning);
+    return (
+      <Tooltip>
+        <TooltipTrigger asChild>
+          <Badge 
+            variant="outline" 
+            className="cursor-help bg-yellow-100 text-yellow-700 border-yellow-200 hover:bg-yellow-200 transition-colors uppercase tracking-wider text-[10px] py-0 px-1.5 h-5 flex items-center gap-1"
+          >
+            <AlertTriangle className="w-3 h-3 text-yellow-600" />
+            WARNING
+          </Badge>
+        </TooltipTrigger>
+        <TooltipContent className="bg-zinc-900 border-zinc-800 text-white p-2 text-xs shadow-xl">
+          <p className="font-medium">{msg}</p>
+        </TooltipContent>
+      </Tooltip>
+    );
+  };
+
+  const getBorderClass = (code: string, line?: number) => {
+    return checkWarning(code, line) 
+      ? 'border-yellow-400 bg-yellow-50/50 ring-2 ring-yellow-400/20' 
+      : 'border-gray-200 bg-white focus:border-gray-300 focus:ring-1 focus:ring-gray-300';
+  };
+
+  const handleFieldChange = (field: keyof PurchaseInvoicePreviewPayload, value: any) => {
+    setPayload((prev) => (prev ? { ...prev, [field]: value } : null));
+    
+    if (field === 'supplierInvoiceNo') removeWarning(['missing_invoice_number', 'invoice_number_already_exists']);
+    if (field === 'docDate') removeWarning(['missing_invoice_date']);
+    if (field === 'creditorCode') removeWarning(['creditor_needs_review', 'creditor_not_matched']);
+    if (field === 'purchaseAgent') removeWarning(['agent_needs_review', 'agent_not_matched']);
+    if (field === 'currencyCode') removeWarning(['currency_not_confirmed']);
+    if (field === 'displayTerm') removeWarning(['display_term_not_confirmed']);
+  };
+
+  const handleItemChange = (index: number, field: keyof PurchaseInvoicePreviewDetail, value: any) => {
+    setPayload((prev) => {
+      if (!prev) return prev;
+      const newDetails = [...prev.details];
+      newDetails[index] = { ...newDetails[index], [field]: value };
+      
+      // Auto calc amount if qty or unitPrice changes
+      if (field === 'qty' || field === 'unitPrice') {
+        const qty = Number(newDetails[index].qty) || 0;
+        const price = Number(newDetails[index].unitPrice) || 0;
+        newDetails[index].amount = (qty * price).toFixed(2);
+      }
+      return { ...prev, details: newDetails };
+    });
+
+    if (field === 'itemCode' || field === 'description') {
+       removeWarning(['item_needs_review', 'item_not_matched'], index);
+    }
+    if (field === 'taxCode') {
+       removeWarning(['tax_code_not_confirmed'], index);
+    }
+  };
+
+  const addItem = () => {
+    setPayload((prev) => {
+      if (!prev) return prev;
+      return {
+        ...prev,
+        details: [
+          ...prev.details,
+          {
+            itemCode: '',
+            description: '',
+            desc2: '',
+            qty: 1,
+            unitPrice: 0,
+            amount: 0,
+            uom: 'UNIT',
+            taxCode: '',
+            accNo: '',
+            itemGroup: ''
+          }
+        ]
+      };
+    });
+  };
+
+  const removeItem = (index: number) => {
+    setPayload((prev) => {
+      if (!prev) return prev;
+      const newDetails = [...prev.details];
+      newDetails.splice(index, 1);
+      return { ...prev, details: newDetails };
+    });
+  };
+
+  const handleSubmit = async () => {
+    if (!payload) return;
+    try {
+      setSubmitting(true);
+      const req: PurchaseInvoiceSubmitRequest = {
+        requestId: `submit-${Date.now()}`,
+        previewTaskId: taskId,
+        payload: {
+          creditorCode: payload.creditorCode,
+          purchaseAgent: payload.purchaseAgent || '',
+          supplierInvoiceNo: payload.supplierInvoiceNo,
+          docDate: payload.docDate,
+          currencyCode: payload.currencyCode,
+          currencyRate: payload.currencyRate,
+          displayTerm: payload.displayTerm,
+          purchaseLocation: payload.purchaseLocation,
+          description: payload.description,
+          details: payload.details.map((d: any) => ({
+            itemCode: d.itemCode,
+            description: d.description || '',
+            desc2: d.desc2 || '',
+            qty: d.qty,
+            unitPrice: d.unitPrice,
+            amount: d.amount,
+            uom: d.uom,
+            taxCode: d.taxCode || '',
+            accNo: d.accNo,
+            itemGroup: d.itemGroup || ''
+          }))
+        },
+        createMissing: { items: [] }
+      };
+      
+      const res = (await submitPurchaseInvoice(req)) as any;
+      if (res.taskId) {
+        toast.info('Submitting invoice...');
+        await waitForPurchaseInvoiceSubmit(res.taskId);
+        toast.success('Purchase Invoice submitted successfully!');
+        router.push('/purchase-invoice');
+      } else {
+        toast.success('Purchase Invoice submitted successfully!');
+        router.push('/purchase-invoice');
+      }
+    } catch (error: any) {
+      toast.error(error.message || 'Submit failed');
+    } finally {
+      setSubmitting(false);
+    }
+  };
+
+  const formatNumber = (num: number | string) => {
+    return new Intl.NumberFormat('en-US').format(Number(num) || 0);
+  };
+
+  const parseNumber = (str: string) => {
+    return Number(str.replace(/,/g, '')) || 0;
+  };
+
+  if (loading || !payload) {
+    return (
+      <div className="flex h-screen flex-col bg-white">
+        <div className="flex shrink-0 items-center justify-between gap-4 border-b border-zinc-200/80 bg-white/80 px-6 py-4 backdrop-blur-md sticky top-0 z-10">
+          <h1 className="text-xl font-semibold tracking-tight text-zinc-950">Purchase invoice review draft</h1>
+          <div className="flex items-center gap-3">
+            <Link href="/purchase-invoice" className="rounded-xl px-4 py-2 text-sm font-medium text-zinc-600 transition hover:bg-zinc-100 hover:text-zinc-900">Back</Link>
+          </div>
+        </div>
+        <div className="flex-1 flex items-center justify-center">
+          <div className="flex flex-col items-center gap-4 text-zinc-500">
+            <Loader2 className="h-8 w-8 animate-spin text-zinc-400" />
+            <p className="text-sm">Loading preview...</p>
+          </div>
+        </div>
+      </div>
+    );
+  }
+
+  const subtotal = payload.details.reduce((acc, item) => acc + (Number(item.qty) * Number(item.unitPrice)), 0);
+  const taxAmount = payload.details.reduce((acc, item) => {
+    // Basic mock: 11% tax for items that have a taxCode present
+    if (item.taxCode) {
+      return acc + (Number(item.amount) * 0.11);
+    }
+    return acc;
+  }, 0);
+  const totalAmount = subtotal + taxAmount;
+
+  return (
+    <TooltipProvider delayDuration={200}>
+      <div className="flex h-screen flex-col bg-white font-sans text-zinc-900">
+      {/* Header */}
+      <div className="flex shrink-0 items-center justify-between gap-4 border-b border-zinc-200/80 bg-white/80 px-6 py-4 backdrop-blur-md sticky top-0 z-10">
+        <h1 className="text-xl font-semibold tracking-tight text-zinc-950">Purchase invoice review draft</h1>
+
+        <div className="flex items-center gap-3">
+          <Link
+            href="/purchase-invoice"
+            className="rounded-xl px-4 py-2 text-sm font-medium text-zinc-600 transition hover:bg-zinc-100 hover:text-zinc-900"
+          >
+            Back
+          </Link>
+          {payload.externalLink && (
+            <a
+              href={payload.externalLink}
+              target="_blank"
+              rel="noopener noreferrer"
+              className="inline-flex items-center gap-2 rounded-xl border border-zinc-200 bg-white px-4 py-2 text-sm font-medium text-zinc-900 transition hover:bg-zinc-50"
+            >
+              <Download className="h-4 w-4" />
+              Download Original
+            </a>
+          )}
+          <button
+            type="button"
+            onClick={handleSubmit}
+            disabled={submitting}
+            className="inline-flex items-center gap-2 rounded-xl bg-zinc-950 px-4 py-2 text-sm font-semibold text-white transition hover:bg-zinc-800 disabled:opacity-50"
+          >
+            {submitting && <Loader2 className="h-4 w-4 animate-spin" />}
+            Submit Purchase Invoice
+          </button>
+        </div>
+      </div>
+
+      {/* Main Content */}
+      <div className="min-h-0 flex-1 overflow-hidden">
+        <div className="w-full grid grid-cols-1 lg:grid-cols-[1fr_1.1fr] h-full">
+          
+          {/* Left Column: Form */}
+          <div className="p-8 border-r border-gray-100 overflow-y-auto">
+            <h2 className="text-lg font-medium mb-8">Invoice Details</h2>
+
+            <div className="space-y-6">
+              <div className="grid grid-cols-3 gap-4">
+                {/* Creditor Code */}
+                <div>
+                  <label className="block text-sm font-medium text-gray-700 mb-1.5 flex items-center gap-2">
+                    Creditor Code
+                    <FieldWarning code="creditor_not_matched" customMsg="No matching creditor found" />
+                    <FieldWarning code="creditor_needs_review" customMsg="Please review creditor match" />
+                  </label>
+                  <Popover open={isCreditorOpen} onOpenChange={setIsCreditorOpen}>
+                    <PopoverTrigger asChild>
+                      <button
+                        type="button"
+                        role="combobox"
+                        className={cn("w-full h-[42px] flex items-center justify-between border rounded-md px-3 py-2 text-sm transition-all duration-200 bg-white outline-none", getBorderClass('creditor_', -1))}
+                      >
+                        <span className="truncate">{payload.creditorCode || "Select Creditor"}</span>
+                        <ChevronDown className="ml-2 h-4 w-4 shrink-0 opacity-50" />
+                      </button>
+                    </PopoverTrigger>
+                    <PopoverContent className="w-[300px] p-0 bg-white shadow-xl border border-gray-100" align="start">
+                      <Command shouldFilter={false}>
+                        <CommandInput 
+                          placeholder="Search creditor..." 
+                          value={creditorSearch}
+                          onValueChange={setCreditorSearch}
+                        />
+                        <CommandList>
+                          {isCreditorLoading && <div className="p-4 text-xs text-center text-gray-500">Loading...</div>}
+                          <CommandEmpty>No results found.</CommandEmpty>
+                          <CommandGroup>
+                            <CommandItem
+                              value="none"
+                              onSelect={() => {
+                                handleFieldChange('creditorCode', "");
+                                setIsCreditorOpen(false);
+                              }}
+                            >
+                              <div className="flex flex-col">
+                                <span className="font-medium text-red-500">None</span>
+                              </div>
+                            </CommandItem>
+                            {creditorOptions.map((opt) => (
+                              <CommandItem
+                                key={opt.accNo}
+                                value={opt.accNo}
+                                onSelect={() => {
+                                  handleFieldChange('creditorCode', opt.accNo);
+                                  setIsCreditorOpen(false);
+                                }}
+                              >
+                                <div className="flex flex-col">
+                                  <span className="font-semibold">{opt.accNo}</span>
+                                  <span className="text-xs text-gray-500">{opt.companyName}</span>
+                                </div>
+                              </CommandItem>
+                            ))}
+                            {payload.creditorCode && !creditorSearch && !creditorOptions.find(o => o.accNo === payload.creditorCode) && (
+                              <CommandItem
+                                value={payload.creditorCode}
+                                onSelect={() => setIsCreditorOpen(false)}
+                              >
+                                {payload.creditorCode} (Current)
+                              </CommandItem>
+                            )}
+                          </CommandGroup>
+                        </CommandList>
+                      </Command>
+                    </PopoverContent>
+                  </Popover>
+                </div>
+                {/* Purchase Agent */}
+                <div>
+                  <label className="block text-sm font-medium text-gray-700 mb-1.5 flex items-center gap-2">
+                    Purchase Agent
+                    <FieldWarning code="agent_not_matched" customMsg="No matching agent found" />
+                    <FieldWarning code="agent_needs_review" customMsg="Please review agent match" />
+                  </label>
+                  <Popover open={isAgentOpen} onOpenChange={setIsAgentOpen}>
+                    <PopoverTrigger asChild>
+                      <button
+                        type="button"
+                        role="combobox"
+                        className={cn("w-full h-[42px] flex items-center justify-between border rounded-md px-3 py-2 text-sm transition-all duration-200 bg-white outline-none", getBorderClass('agent_', -1))}
+                      >
+                        <span className="truncate">{payload.purchaseAgent || "Select Agent"}</span>
+                        <ChevronDown className="ml-2 h-4 w-4 shrink-0 opacity-50" />
+                      </button>
+                    </PopoverTrigger>
+                    <PopoverContent className="w-[300px] p-0 bg-white shadow-xl border border-gray-100" align="start">
+                      <Command shouldFilter={false}>
+                        <CommandInput 
+                          placeholder="Search agent..." 
+                          value={agentSearch}
+                          onValueChange={setAgentSearch}
+                        />
+                        <CommandList>
+                          {isAgentLoading && <div className="p-4 text-xs text-center text-gray-500">Loading...</div>}
+                          <CommandEmpty>No results found.</CommandEmpty>
+                          <CommandGroup>
+                            <CommandItem
+                              value="none"
+                              onSelect={() => {
+                                handleFieldChange('purchaseAgent', "");
+                                setIsAgentOpen(false);
+                              }}
+                            >
+                              <div className="flex flex-col">
+                                <span className="font-medium text-red-500">None</span>
+                              </div>
+                            </CommandItem>
+                            {agentOptions.map((opt) => (
+                              <CommandItem
+                                key={opt.code}
+                                value={opt.code}
+                                onSelect={() => {
+                                  handleFieldChange('purchaseAgent', opt.code);
+                                  setIsAgentOpen(false);
+                                }}
+                              >
+                                <div className="flex flex-col">
+                                  <span className="font-semibold">{opt.code}</span>
+                                  <span className="text-xs text-gray-500">{opt.description}</span>
+                                </div>
+                              </CommandItem>
+                            ))}
+                            {payload.purchaseAgent && !agentSearch && !agentOptions.find(o => o.code === payload.purchaseAgent) && (
+                              <CommandItem
+                                value={payload.purchaseAgent}
+                                onSelect={() => setIsAgentOpen(false)}
+                              >
+                                {payload.purchaseAgent} (Current)
+                              </CommandItem>
+                            )}
+                          </CommandGroup>
+                        </CommandList>
+                      </Command>
+                    </PopoverContent>
+                  </Popover>
+                </div>
+                {/* Supplier Invoice No */}
+                <div>
+                  <label className="block text-sm font-medium text-gray-700 mb-1.5 flex items-center gap-2">
+                    Supplier Invoice No
+                    <FieldWarning code="missing_invoice_number" customMsg="Missing Invoice No" />
+                    <FieldWarning code="invoice_number_already_exists" customMsg="Invoice No Already Exists" />
+                  </label>
+                  <input
+                    type="text"
+                    value={payload.supplierInvoiceNo}
+                    onChange={(e) => handleFieldChange('supplierInvoiceNo', e.target.value)}
+                    className={cn("w-full h-[42px] rounded-md px-3 py-2.5 text-sm transition-colors border outline-none", getBorderClass('invoice_number', -1))}
+                  />
+                </div>
+              </div>
+
+              {/* Dates & Terms */}
+              <div className="grid grid-cols-3 gap-4">
+                <div>
+                  <label className="block text-sm font-medium text-gray-700 mb-1.5 flex items-center gap-2">
+                    Doc Date (YYYY-MM-DD)
+                    <FieldWarning code="missing_invoice_date" customMsg="Missing Date" />
+                  </label>
+                  <Popover>
+                    <PopoverTrigger asChild>
+                      <button
+                        type="button"
+                        className={cn(
+                          "w-full h-[42px] flex items-center justify-between border rounded-md px-3 py-2 text-sm transition-colors bg-white outline-none",
+                          !payload.docDate && "text-gray-500",
+                          getBorderClass('missing_invoice_date')
+                        )}
+                      >
+                        {payload.docDate ? payload.docDate : "Pick a date"}
+                        <CalendarIcon className="w-4 h-4 text-gray-400" />
+                      </button>
+                    </PopoverTrigger>
+                    <PopoverContent className="w-auto p-0 z-50 bg-white" align="start">
+                      <Calendar
+                        mode="single"
+                        selected={payload.docDate ? new Date(payload.docDate) : undefined}
+                        onSelect={(date) => {
+                          if (date) {
+                            handleFieldChange('docDate', format(date, 'yyyy-MM-dd'));
+                          }
+                        }}
+                        initialFocus
+                        captionLayout="dropdown"
+                      />
+                    </PopoverContent>
+                  </Popover>
+                </div>
+                <div>
+                  <label className="block text-sm font-medium text-gray-700 mb-1.5 flex items-center gap-2">
+                    Display Term
+                    <FieldWarning code="display_term_not_confirmed" customMsg="Review term" />
+                  </label>
+                  <input
+                    type="text"
+                    value={payload.displayTerm}
+                    onChange={(e) => handleFieldChange('displayTerm', e.target.value)}
+                    className={cn("w-full rounded-lg px-3 py-2.5 text-sm transition-colors border outline-none", getBorderClass('display_term_not_confirmed'))}
+                  />
+                </div>
+                <div>
+                  <label className="block text-sm font-medium text-gray-700 mb-1.5">
+                    Location
+                  </label>
+                  <input
+                    type="text"
+                    value={payload.purchaseLocation}
+                    onChange={(e) => handleFieldChange('purchaseLocation', e.target.value)}
+                    className={cn("w-full h-[42px] px-3 py-2.5 text-sm transition-all duration-200 border outline-none rounded-lg", getBorderClass('purchase_location', -1))}
+                  />
+                </div>
+              </div>
+
+              <div className="grid grid-cols-2 gap-4">
+                {/* Currency */}
+                <div>
+                  <label className="block text-sm font-medium text-gray-700 mb-1.5 flex items-center gap-2">
+                    Currency
+                    <FieldWarning code="currency_not_confirmed" customMsg="Review currency" />
+                  </label>
+                  <input
+                    type="text"
+                    value={payload.currencyCode}
+                    onChange={(e) => handleFieldChange('currencyCode', e.target.value)}
+                    className={cn("w-full rounded-lg px-3 py-2.5 text-sm transition-colors border outline-none", getBorderClass('currency_not_confirmed'))}
+                  />
+                </div>
+                {/* Currency Rate */}
+                <div>
+                  <label className="block text-sm font-medium text-gray-700 mb-1.5">
+                    Currency Rate
+                  </label>
+                  <input
+                    type="text"
+                    value={payload.currencyRate}
+                    onChange={(e) => handleFieldChange('currencyRate', parseNumber(e.target.value))}
+                    className={cn("w-full h-[42px] px-3 py-2.5 text-sm transition-all duration-200 border outline-none rounded-lg", getBorderClass('currency_rate', -1))}
+                  />
+                </div>
+              </div>
+
+              <div>
+                <label className="block text-sm font-medium text-gray-700 mb-1.5">
+                  Description
+                </label>
+                 <input
+                  type="text"
+                  value={payload.description}
+                  onChange={(e) => handleFieldChange('description', e.target.value)}
+                  className={cn("w-full px-3 py-2.5 text-sm transition-all duration-200 border outline-none rounded-lg", getBorderClass('description', -1))}
+                />
+              </div>
+
+              <div className={cn("p-4 rounded-xl transition-all duration-200", checkWarning('missing_items') ? "border-2 border-yellow-400 bg-yellow-50/20 ring-4 ring-yellow-400/10" : "")}>
+                <label className="flex items-center gap-2 text-sm font-medium text-gray-700 mb-3">
+                  Items Details
+                  <FieldWarning code="missing_items" customMsg="Missing Items" />
+                </label>
+                
+                <div className="bg-gray-50/50 rounded-md p-3 mb-2 grid grid-cols-[1.5fr_1fr_60px_60px_1fr_1fr_60px] gap-3 text-xs font-medium text-gray-500 items-center">
+                  <div>Item Code</div>
+                  <div>Acc No</div>
+                  <div className="text-center">QTY</div>
+                  <div className="text-center">UOM</div>
+                  <div className="text-right">Unit Price</div>
+                  <div className="text-right">Amount</div>
+                  <div className="text-center">Action</div>
+                </div>
+
+                <div className="space-y-3">
+                  {payload.details.map((item, index) => (
+                    <div key={index} className="flex flex-col gap-1">
+                      <div className="flex gap-2 mb-1">
+                        <FieldWarning code="item_not_matched" line={index} customMsg="Item not matched" />
+                        <FieldWarning code="item_needs_review" line={index} customMsg="Please review item match" />
+                        <FieldWarning code="tax_code_not_confirmed" line={index} customMsg="Review Tax Code" />
+                      </div>
+                      <div className="grid grid-cols-[1.5fr_1fr_60px_60px_1fr_1fr_60px] gap-3 items-center">
+                        <Popover 
+                          open={activeStockIdx === index} 
+                          onOpenChange={(open) => setActiveStockIdx(open ? index : null)}
+                        >
+                          <PopoverTrigger asChild>
+                            <button
+                              type="button"
+                              className={cn(
+                                "w-full border rounded-lg px-2 py-2 text-sm text-left transition-colors outline-none truncate h-[38px] bg-white",
+                                getBorderClass('item_', index)
+                              )}
+                            >
+                              {item.itemCode || <span className="text-gray-400 italic">Item Code</span>}
+                            </button>
+                          </PopoverTrigger>
+                          <PopoverContent className="w-[350px] p-0 bg-white shadow-xl border border-gray-100" align="start">
+                            <Command shouldFilter={false}>
+                              <CommandInput 
+                                placeholder="Search stock item..." 
+                                value={stockSearch}
+                                onValueChange={setStockSearch}
+                              />
+                              <CommandList>
+                                {isStockLoading && <div className="p-4 text-xs text-center text-gray-500">Loading...</div>}
+                                <CommandEmpty>No stock found.</CommandEmpty>
+                                <CommandGroup>
+                                  {stockOptions.map((opt) => (
+                                    <CommandItem
+                                      key={opt.itemCode}
+                                      value={opt.itemCode}
+                                      onSelect={() => {
+                                        handleItemChange(index, 'itemCode', opt.itemCode);
+                                        handleItemChange(index, 'description', opt.description);
+                                        handleItemChange(index, 'itemGroup', opt.group);
+                                        setActiveStockIdx(null);
+                                        setStockSearch("");
+                                      }}
+                                    >
+                                      <div className="flex flex-col">
+                                        <span className="font-semibold">{opt.itemCode}</span>
+                                        <span className="text-xs text-gray-500 line-clamp-1">{opt.description}</span>
+                                      </div>
+                                    </CommandItem>
+                                  ))}
+                                </CommandGroup>
+                              </CommandList>
+                            </Command>
+                          </PopoverContent>
+                        </Popover>
+                      <input
+                        type="text"
+                        value={item.accNo || ''}
+                        onChange={(e) => handleItemChange(index, 'accNo', e.target.value)}
+                        placeholder="Acc No"
+                        className={cn("w-full border rounded-lg px-2 py-2 text-sm transition-all duration-200 outline-none", getBorderClass('acc_no', index))}
+                      />
+                      <input
+                        type="text"
+                        value={item.qty}
+                        onChange={(e) => handleItemChange(index, 'qty', parseNumber(e.target.value))}
+                        className={cn("w-full border rounded-lg px-2 py-2 text-sm text-center transition-all duration-200 outline-none", getBorderClass('qty', index))}
+                      />
+                      <input
+                        type="text"
+                        value={item.uom || ''}
+                        onChange={(e) => handleItemChange(index, 'uom', e.target.value)}
+                        placeholder="UOM"
+                        className={cn("w-full border rounded-lg px-2 py-2 text-sm text-center transition-all duration-200 outline-none", getBorderClass('uom', index))}
+                      />
+                      <input
+                        type="text"
+                        value={item.unitPrice}
+                        onChange={(e) => handleItemChange(index, 'unitPrice', parseNumber(e.target.value))}
+                        className={cn("w-full border rounded-lg px-2 py-2 text-sm text-right transition-all duration-200 outline-none", getBorderClass('unit_price', index))}
+                      />
+                      <div className="relative flex items-center">
+                        <span className="absolute left-2 text-xs text-gray-500 pointer-events-none">{payload.currencyCode}</span>
+                        <input
+                          type="text"
+                          value={item.amount}
+                          onChange={(e) => handleItemChange(index, 'amount', parseNumber(e.target.value))}
+                          className={cn("w-full border rounded-lg pl-10 pr-2 py-2 text-sm text-right transition-all duration-200 outline-none", getBorderClass('amount', index))}
+                        />
+                      </div>
+                      <div className="flex items-center justify-center gap-1">
+                        <button
+                          type="button"
+                          onClick={() => setEditingItemIndex(index)}
+                          className="text-gray-400 hover:text-blue-500 transition-colors p-1"
+                          title="Edit Advanced Details"
+                        >
+                          <Edit3 className="w-4 h-4" />
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => removeItem(index)}
+                          className="text-gray-400 hover:text-red-500 transition-colors p-1"
+                        >
+                          <Trash2 className="w-4 h-4" />
+                        </button>
+                      </div>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+
+                <button
+                  type="button"
+                  onClick={addItem}
+                  className="mt-4 flex items-center gap-1.5 text-sm font-medium text-gray-700 hover:text-gray-900 transition-colors"
+                >
+                  <Plus className="w-4 h-4" /> Add Item
+                </button>
+              </div>
+            </div>
+          </div>
+
+          <Dialog open={editingItemIndex !== null} onOpenChange={(open) => !open && setEditingItemIndex(null)}>
+            <DialogContent className="sm:max-w-[450px] bg-white">
+              <DialogHeader>
+                <DialogTitle>Extra Item Details</DialogTitle>
+              </DialogHeader>
+              {editingItemIndex !== null && payload.details[editingItemIndex] && (
+                <div className="grid gap-4 py-4">
+                  <div>
+                    <label className="text-sm font-medium mb-1.5 block">Description</label>
+                    <input
+                      type="text"
+                      className="flex h-10 w-full rounded-md border border-gray-200 px-3 py-2 text-sm focus:outline-none focus:ring-1 focus:ring-gray-300"
+                      value={payload.details[editingItemIndex].description || ''}
+                      onChange={(e) => handleItemChange(editingItemIndex, 'description', e.target.value)}
+                    />
+                  </div>
+                  <div>
+                    <label className="text-sm font-medium mb-1.5 block">Description 2 (desc2)</label>
+                    <input
+                      type="text"
+                      className="flex h-10 w-full rounded-md border border-gray-200 px-3 py-2 text-sm focus:outline-none focus:ring-1 focus:ring-gray-300"
+                      value={payload.details[editingItemIndex].desc2 || ''}
+                      onChange={(e) => handleItemChange(editingItemIndex, 'desc2', e.target.value)}
+                    />
+                  </div>
+                  <div>
+                    <label className="text-sm font-medium mb-1.5 block">Tax Code</label>
+                    <input
+                      type="text"
+                      className="flex h-10 w-full rounded-md border border-gray-200 px-3 py-2 text-sm focus:outline-none focus:ring-1 focus:ring-gray-300"
+                      value={payload.details[editingItemIndex].taxCode || ''}
+                      onChange={(e) => handleItemChange(editingItemIndex, 'taxCode', e.target.value)}
+                    />
+                  </div>
+                  <div>
+                    <label className="text-sm font-medium mb-1.5 block">Item Group (Creation only)</label>
+                    <input
+                      type="text"
+                      className="flex h-10 w-full rounded-md border border-gray-200 px-3 py-2 text-sm focus:outline-none focus:ring-1 focus:ring-gray-300"
+                      value={payload.details[editingItemIndex].itemGroup || ''}
+                      onChange={(e) => handleItemChange(editingItemIndex, 'itemGroup', e.target.value)}
+                    />
+                  </div>
+                </div>
+              )}
+              <DialogFooter>
+                <button
+                  type="button"
+                  onClick={() => setEditingItemIndex(null)}
+                  className="rounded-md bg-zinc-900 px-4 py-2 text-sm font-medium text-white hover:bg-zinc-800"
+                >
+                  Confirm
+                </button>
+              </DialogFooter>
+            </DialogContent>
+          </Dialog>
+
+          {/* Right Column: Preview */}
+          <div className="bg-[#f8f9fa] p-8 overflow-y-auto">
+            <h2 className="text-lg font-medium mb-8">Preview</h2>
+            
+            <div className="bg-white rounded-2xl shadow-[0_2px_10px_rgba(0,0,0,0.04)] p-10 max-w-2xl mx-auto">
+              {/* Logo */}
+              <div className="mb-10 flex justify-between items-start">
+                <div className="w-12 h-12 bg-[#1a1f2e] rounded-xl flex items-center justify-center text-white">
+                  <Waves className="w-6 h-6" />
+                </div>
+                <div className="text-right">
+                  <div className="text-2xl font-semibold text-zinc-900">INVOICE</div>
+                  <div className="text-sm text-zinc-500 mt-1">#{payload.supplierInvoiceNo}</div>
+                </div>
+              </div>
+
+              {/* Dates */}
+              <div className="grid grid-cols-3 gap-8 mb-10">
+                <div>
+                  <div className="text-sm text-gray-500 mb-1">Doc Date</div>
+                  <div className="text-sm font-medium">{payload.docDate}</div>
+                </div>
+                <div>
+                  <div className="text-sm text-gray-500 mb-1">Term</div>
+                  <div className="text-sm font-medium">{payload.displayTerm}</div>
+                </div>
+                <div>
+                  <div className="text-sm text-gray-500 mb-1">Currency</div>
+                  <div className="text-sm font-medium">{payload.currencyCode}</div>
+                </div>
+              </div>
+
+              {/* Addresses & Agent */}
+              <div className="grid grid-cols-2 gap-8 mb-10">
+                <div>
+                  <div className="text-sm text-gray-500 mb-2">Creditor:</div>
+                  <div className="text-base font-medium mb-1">{payload.creditorCode || '-'}</div>
+                  <div className="text-sm text-gray-500 max-w-lg leading-relaxed">
+                    {payload.creditorAddressLines?.join(', ') || 'No address provided'}
+                  </div>
+                </div>
+                <div>
+                  <div className="text-sm text-gray-500 mb-2">Purchase Agent:</div>
+                  <div className="text-base font-medium mb-1">{payload.purchaseAgent || '-'}</div>
+                </div>
+              </div>
+
+              {/* Items Table */}
+              <div className="mb-10">
+                <table className="w-full text-sm">
+                  <thead>
+                    <tr className="border-b border-gray-100">
+                      <th className="text-left font-medium text-gray-500 py-3">Item Code</th>
+                      <th className="text-left font-medium text-gray-500 py-3">Acc No</th>
+                      <th className="text-right font-medium text-gray-500 py-3">QTY</th>
+                      <th className="text-right font-medium text-gray-500 py-3">Price</th>
+                      <th className="text-right font-medium text-gray-500 py-3">Amount</th>
+                    </tr>
+                  </thead>
+                  <tbody className="divide-y divide-gray-50">
+                    {payload.details.map((item, index) => (
+                      <tr key={index}>
+                        <td className="py-4 font-medium">{item.itemCode || '-'}</td>
+                        <td className="py-4 text-gray-600">{item.accNo || '-'}</td>
+                        <td className="py-4 text-right text-gray-600">{item.qty} {item.uom}</td>
+                        <td className="py-4 text-right text-gray-600">{formatNumber(item.unitPrice)}</td>
+                        <td className="py-4 text-right font-medium">{formatNumber(item.amount)}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+
+              {/* Footer / Summary */}
+              <div className="flex justify-end pt-6 border-t border-gray-100">
+                {/* Totals */}
+                <div className="w-64 space-y-3">
+                  <div className="flex justify-between text-sm">
+                    <span className="text-gray-500">Subtotal ({payload.currencyCode})</span>
+                    <span className="font-medium">{formatNumber(subtotal)}</span>
+                  </div>
+                  <div className="flex justify-between text-sm">
+                    <span className="text-gray-500">Auto Tax (11% if code present)</span>
+                    <span className="font-medium">{formatNumber(taxAmount.toFixed(2))}</span>
+                  </div>
+                  <div className="flex justify-between text-base font-semibold pt-3 border-t border-gray-100">
+                    <span className="text-zinc-900">Total</span>
+                    <span className="text-zinc-900">{formatNumber(totalAmount.toFixed(2))}</span>
+                  </div>
+                </div>
+              </div>
+
+              {/* Notes */}
+              {payload.description && (
+                <div className="mt-12 pt-6 border-t border-gray-100">
+                  <div className="text-sm text-gray-500 mb-2">Description</div>
+                  <div className="text-sm text-gray-900 whitespace-pre-line leading-relaxed">
+                    {payload.description}
+                  </div>
+                </div>
+              )}
+            </div>
+          </div>
+
+        </div>
+      </div>
+    </div>
+    </TooltipProvider>
+  );
+}

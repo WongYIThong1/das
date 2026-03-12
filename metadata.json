@@ -1,0 +1,5 @@
+{
+  "name": "Inventory Management System",
+  "description": "A management system with Purchase Invoice, Creditor Manage, and Stock Manage features.",
+  "requestFramePermissions": []
+}
