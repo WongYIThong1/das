@@ -5,7 +5,7 @@ import { Calendar as CalendarIcon, ChevronDown, Plus, Trash2, Waves, Loader2, Ed
 import Link from 'next/link';
 import { useParams, useRouter } from 'next/navigation';
 import { toast } from 'sonner';
-import { format, parse } from 'date-fns';
+import { format } from 'date-fns';
 
 import { Select, SelectContent, SelectGroup, SelectItem, SelectLabel, SelectScrollDownButton, SelectScrollUpButton, SelectSeparator, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
@@ -17,19 +17,23 @@ import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/comp
 import { cn } from "@/lib/utils";
 import { Search, AlertTriangle } from 'lucide-react';
 
-import { waitForPurchaseInvoicePreview, PurchaseInvoicePreviewPayload, PurchaseInvoicePreviewDetail, getCreditorOptions, getAgentOptions, getStockOptions } from '../../../../lib/purchase-invoice-create-api';
-import { submitPurchaseInvoice, PurchaseInvoiceSubmitRequest, waitForPurchaseInvoiceSubmit } from '../../../../lib/purchase-invoice-submit-api';
+import { waitForPurchaseInvoicePreview, type PreviewTaskStatus, PurchaseInvoicePreviewPayload, PurchaseInvoicePreviewDetail, getCreditorOptions, getAgentOptions, getStockOptions } from '../../../../lib/purchase-invoice-create-api';
+import { type PurchaseInvoiceSubmitRequest } from '../../../../lib/purchase-invoice-submit-api';
+import { useSubmit } from '../../../../components/SubmitProvider';
 
 export default function PurchaseInvoiceTaskPage() {
   const params = useParams();
   const router = useRouter();
   const taskId = params.taskId as string;
 
+  const { startSubmit, isRunning: submitting } = useSubmit();
   const [loading, setLoading] = useState(true);
-  const [submitting, setSubmitting] = useState(false);
   const [payload, setPayload] = useState<PurchaseInvoicePreviewPayload | null>(null);
   const [editingItemIndex, setEditingItemIndex] = useState<number | null>(null);
-  const [warnings, setWarnings] = useState<any[]>([]);
+  const [warnings, setWarnings] = useState<unknown[]>([]);
+  const [taskStatus, setTaskStatus] = useState<PreviewTaskStatus | null>(null);
+  const [earlyDownloadUrl, setEarlyDownloadUrl] = useState<string | null>(null);
+  const [earlyExternalLink, setEarlyExternalLink] = useState<string | null>(null);
 
   // Search/Picker states
   const [creditorOptions, setCreditorOptions] = useState<any[]>([]);
@@ -43,16 +47,39 @@ export default function PurchaseInvoiceTaskPage() {
   const [isCreditorLoading, setIsCreditorLoading] = useState(false);
   const [isAgentLoading, setIsAgentLoading] = useState(false);
   const [isStockLoading, setIsStockLoading] = useState(false);
+  const [isCreditorLoadingMore, setIsCreditorLoadingMore] = useState(false);
+  const [isAgentLoadingMore, setIsAgentLoadingMore] = useState(false);
+  const [isStockLoadingMore, setIsStockLoadingMore] = useState(false);
   
   const [isCreditorOpen, setIsCreditorOpen] = useState(false);
   const [isAgentOpen, setIsAgentOpen] = useState(false);
   const [activeStockIdx, setActiveStockIdx] = useState<number | null>(null);
 
+  const [creditorPage, setCreditorPage] = useState(1);
+  const [creditorTotalPages, setCreditorTotalPages] = useState(1);
+  const [agentPage, setAgentPage] = useState(1);
+  const [agentTotalPages, setAgentTotalPages] = useState(1);
+  const [stockPage, setStockPage] = useState(1);
+  const [stockTotalPages, setStockTotalPages] = useState(1);
+
   useEffect(() => {
     if (!taskId) return;
     
     let isMounted = true;
-    waitForPurchaseInvoicePreview(taskId, 'invoice')
+    waitForPurchaseInvoicePreview(taskId, 'invoice', {
+      onProgress: (nextTask) => {
+        if (!isMounted) {
+          return;
+        }
+        setTaskStatus(nextTask.status);
+        if (nextTask.file?.downloadUrl) {
+          setEarlyDownloadUrl(nextTask.file.downloadUrl);
+        }
+        if (nextTask.externalLink) {
+          setEarlyExternalLink(nextTask.externalLink);
+        }
+      },
+    })
       .then((res: any) => {
         if (isMounted) {
           setPayload(res.payload);
@@ -63,78 +90,225 @@ export default function PurchaseInvoiceTaskPage() {
       })
       .catch((err) => {
         if (isMounted) {
+          if (err?.status === 499) {
+            toast.message('Preview cancelled. You can upload another invoice anytime.');
+            router.push('/purchase-invoice');
+            return;
+          }
           toast.error(err.message || 'Failed to load preview');
           setLoading(false);
         }
       });
     return () => { isMounted = false; };
-  }, [taskId]);
+  }, [router, taskId]);
+
+  // Preload picker options as soon as the user enters the page, so the first open
+  // of the dropdown is instant (no need to type before seeing options).
+  useEffect(() => {
+    let cancelled = false;
+
+    const preload = async () => {
+      try {
+        setIsCreditorLoading(true);
+        const creditors = await getCreditorOptions({ page: 1, pageSize: 20 });
+        if (!cancelled) {
+          setCreditorOptions(creditors.items || []);
+          setCreditorPage(creditors.page ?? 1);
+          setCreditorTotalPages(creditors.totalPages ?? 1);
+        }
+        // Opportunistic prefetch of next page for smooth scrolling.
+        if (!cancelled && (creditors.totalPages ?? 1) > 1) {
+          const creditors2 = await getCreditorOptions({ page: 2, pageSize: 20 });
+          if (!cancelled) {
+            setCreditorOptions((prev) => [...prev, ...(creditors2.items || [])]);
+            setCreditorPage(creditors2.page ?? 2);
+            setCreditorTotalPages(creditors2.totalPages ?? creditors.totalPages ?? 1);
+          }
+        }
+      } catch (error) {
+        // keep silent: user can still search/open dropdown which will retry
+        console.error('Creditor preload error:', error);
+      } finally {
+        if (!cancelled) setIsCreditorLoading(false);
+      }
+
+      try {
+        setIsAgentLoading(true);
+        const agents = await getAgentOptions({ page: 1, pageSize: 20 });
+        if (!cancelled) {
+          setAgentOptions(agents.items || []);
+          setAgentPage(agents.page ?? 1);
+          setAgentTotalPages(agents.totalPages ?? 1);
+        }
+        if (!cancelled && (agents.totalPages ?? 1) > 1) {
+          const agents2 = await getAgentOptions({ page: 2, pageSize: 20 });
+          if (!cancelled) {
+            setAgentOptions((prev) => [...prev, ...(agents2.items || [])]);
+            setAgentPage(agents2.page ?? 2);
+            setAgentTotalPages(agents2.totalPages ?? agents.totalPages ?? 1);
+          }
+        }
+      } catch (error) {
+        console.error('Agent preload error:', error);
+      } finally {
+        if (!cancelled) setIsAgentLoading(false);
+      }
+    };
+
+    void preload();
+    return () => {
+      cancelled = true;
+    };
+  }, []);
 
   useEffect(() => {
+    if (!isCreditorOpen) {
+      return;
+    }
+
     const fetchOptions = async () => {
-      if (!creditorSearch) {
-        setCreditorOptions([]);
+      // If we already preloaded and user hasn't typed a search, don't refetch on open.
+      if (!creditorSearch.trim() && creditorOptions.length > 0 && creditorPage >= 1) {
         return;
       }
       setIsCreditorLoading(true);
+      setIsCreditorLoadingMore(false);
       try {
-        const res = await getCreditorOptions({ search: creditorSearch, pageSize: 20 });
+        const res = await getCreditorOptions({ search: creditorSearch, page: 1, pageSize: 20 });
         setCreditorOptions(res.items || []);
+        setCreditorPage(res.page ?? 1);
+        setCreditorTotalPages(res.totalPages ?? 1);
       } catch (error) {
         console.error('Creditor options error:', error);
       } finally {
         setIsCreditorLoading(false);
       }
     };
-    const timer = setTimeout(fetchOptions, 300);
+    const timer = setTimeout(fetchOptions, 250);
     return () => clearTimeout(timer);
-  }, [creditorSearch]);
+  }, [creditorOptions.length, creditorPage, creditorSearch, isCreditorOpen]);
 
   useEffect(() => {
+    if (!isAgentOpen) {
+      return;
+    }
+
     const fetchOptions = async () => {
-      if (!agentSearch) {
-        setAgentOptions([]);
+      if (!agentSearch.trim() && agentOptions.length > 0 && agentPage >= 1) {
         return;
       }
       setIsAgentLoading(true);
+      setIsAgentLoadingMore(false);
       try {
-        const res = await getAgentOptions({ search: agentSearch, pageSize: 20 });
+        const res = await getAgentOptions({ search: agentSearch, page: 1, pageSize: 20 });
         setAgentOptions(res.items || []);
+        setAgentPage(res.page ?? 1);
+        setAgentTotalPages(res.totalPages ?? 1);
       } catch (error) {
         console.error('Agent options error:', error);
       } finally {
         setIsAgentLoading(false);
       }
     };
-    const timer = setTimeout(fetchOptions, 300);
+    const timer = setTimeout(fetchOptions, 250);
     return () => clearTimeout(timer);
-  }, [agentSearch]);
+  }, [agentOptions.length, agentPage, agentSearch, isAgentOpen]);
 
   useEffect(() => {
+    if (activeStockIdx === null) {
+      return;
+    }
+
     const fetchOptions = async () => {
-      if (!stockSearch) {
-        setStockOptions([]);
-        return;
-      }
       setIsStockLoading(true);
+      setIsStockLoadingMore(false);
       try {
-        const res = await getStockOptions({ search: stockSearch, pageSize: 20 });
+        const res = await getStockOptions({ search: stockSearch, page: 1, pageSize: 20 });
         setStockOptions(res.items || []);
+        setStockPage(res.page ?? 1);
+        setStockTotalPages(res.totalPages ?? 1);
       } catch (error) {
         console.error('Stock options error:', error);
       } finally {
         setIsStockLoading(false);
       }
     };
-    const timer = setTimeout(fetchOptions, 300);
+    const timer = setTimeout(fetchOptions, 250);
     return () => clearTimeout(timer);
-  }, [stockSearch]);
+  }, [activeStockIdx, stockSearch]);
+
+  const loadMoreCreditors = async () => {
+    if (!isCreditorOpen) return;
+    if (isCreditorLoading || isCreditorLoadingMore) return;
+    if (creditorPage >= creditorTotalPages) return;
+
+    setIsCreditorLoadingMore(true);
+    try {
+      const nextPage = creditorPage + 1;
+      const res = await getCreditorOptions({ search: creditorSearch, page: nextPage, pageSize: 20 });
+      setCreditorOptions((prev) => [...prev, ...(res.items || [])]);
+      setCreditorPage(res.page ?? nextPage);
+      setCreditorTotalPages(res.totalPages ?? creditorTotalPages);
+    } catch (error) {
+      console.error('Creditor options (load more) error:', error);
+    } finally {
+      setIsCreditorLoadingMore(false);
+    }
+  };
+
+  const loadMoreAgents = async () => {
+    if (!isAgentOpen) return;
+    if (isAgentLoading || isAgentLoadingMore) return;
+    if (agentPage >= agentTotalPages) return;
+
+    setIsAgentLoadingMore(true);
+    try {
+      const nextPage = agentPage + 1;
+      const res = await getAgentOptions({ search: agentSearch, page: nextPage, pageSize: 20 });
+      setAgentOptions((prev) => [...prev, ...(res.items || [])]);
+      setAgentPage(res.page ?? nextPage);
+      setAgentTotalPages(res.totalPages ?? agentTotalPages);
+    } catch (error) {
+      console.error('Agent options (load more) error:', error);
+    } finally {
+      setIsAgentLoadingMore(false);
+    }
+  };
+
+  const loadMoreStocks = async () => {
+    if (activeStockIdx === null) return;
+    if (isStockLoading || isStockLoadingMore) return;
+    if (stockPage >= stockTotalPages) return;
+
+    setIsStockLoadingMore(true);
+    try {
+      const nextPage = stockPage + 1;
+      const res = await getStockOptions({ search: stockSearch, page: nextPage, pageSize: 20 });
+      setStockOptions((prev) => [...prev, ...(res.items || [])]);
+      setStockPage(res.page ?? nextPage);
+      setStockTotalPages(res.totalPages ?? stockTotalPages);
+    } catch (error) {
+      console.error('Stock options (load more) error:', error);
+    } finally {
+      setIsStockLoadingMore(false);
+    }
+  };
+
+  type WarningObject = {
+    code: string;
+    message?: string;
+    line?: number;
+  };
+
+  const isWarningObject = (value: unknown): value is WarningObject => {
+    return typeof value === 'object' && value !== null && 'code' in value && typeof (value as any).code === 'string';
+  };
 
   const checkWarning = (code: string, line?: number) => {
     const isGlobal = line === undefined || line === -1;
     return warnings.find(w => {
       // if warning is object
-      if (typeof w === 'object' && w !== null) {
+      if (isWarningObject(w)) {
         if (!w.code.includes(code)) return false;
         if (!isGlobal && w.line !== line) return false;
         return true;
@@ -151,7 +325,7 @@ export default function PurchaseInvoiceTaskPage() {
   const removeWarning = (codes: string[], line?: number) => {
     const isGlobal = line === undefined || line === -1;
     setWarnings(prev => prev.filter(w => {
-      if (typeof w === 'object' && w !== null) {
+      if (isWarningObject(w)) {
         if (codes.includes(w.code)) {
           if (!isGlobal && w.line === line) return false;
           if (isGlobal) return false;
@@ -168,7 +342,13 @@ export default function PurchaseInvoiceTaskPage() {
   const FieldWarning = ({ code, line, customMsg }: { code: string, line?: number, customMsg?: string }) => {
     const warning = checkWarning(code, line);
     if (!warning) return null;
-    const msg = customMsg || (typeof warning === 'object' ? warning.message : warning);
+    const msg =
+      customMsg ??
+      (isWarningObject(warning)
+        ? warning.message ?? warning.code
+        : typeof warning === 'string'
+          ? warning
+          : 'Warning');
     return (
       <Tooltip>
         <TooltipTrigger asChild>
@@ -262,52 +442,35 @@ export default function PurchaseInvoiceTaskPage() {
 
   const handleSubmit = async () => {
     if (!payload) return;
-    try {
-      setSubmitting(true);
-      const req: PurchaseInvoiceSubmitRequest = {
-        requestId: `submit-${Date.now()}`,
-        previewTaskId: taskId,
-        payload: {
-          creditorCode: payload.creditorCode,
-          purchaseAgent: payload.purchaseAgent || '',
-          supplierInvoiceNo: payload.supplierInvoiceNo,
-          docDate: payload.docDate,
-          currencyCode: payload.currencyCode,
-          currencyRate: payload.currencyRate,
-          displayTerm: payload.displayTerm,
-          purchaseLocation: payload.purchaseLocation,
-          description: payload.description,
-          details: payload.details.map((d: any) => ({
-            itemCode: d.itemCode,
-            description: d.description || '',
-            desc2: d.desc2 || '',
-            qty: d.qty,
-            unitPrice: d.unitPrice,
-            amount: d.amount,
-            uom: d.uom,
-            taxCode: d.taxCode || '',
-            accNo: d.accNo,
-            itemGroup: d.itemGroup || ''
-          }))
-        },
-        createMissing: { items: [] }
-      };
-      
-      const res = (await submitPurchaseInvoice(req)) as any;
-      if (res.taskId) {
-        toast.info('Submitting invoice...');
-        await waitForPurchaseInvoiceSubmit(res.taskId);
-        toast.success('Purchase Invoice submitted successfully!');
-        router.push('/purchase-invoice');
-      } else {
-        toast.success('Purchase Invoice submitted successfully!');
-        router.push('/purchase-invoice');
-      }
-    } catch (error: any) {
-      toast.error(error.message || 'Submit failed');
-    } finally {
-      setSubmitting(false);
-    }
+    const req: PurchaseInvoiceSubmitRequest = {
+      requestId: `submit-${Date.now()}`,
+      previewTaskId: taskId,
+      payload: {
+        creditorCode: payload.creditorCode,
+        purchaseAgent: payload.purchaseAgent || '',
+        supplierInvoiceNo: payload.supplierInvoiceNo,
+        docDate: payload.docDate,
+        currencyCode: payload.currencyCode,
+        currencyRate: payload.currencyRate,
+        displayTerm: payload.displayTerm,
+        purchaseLocation: payload.purchaseLocation,
+        description: payload.description,
+        details: payload.details.map((d: any) => ({
+          itemCode: d.itemCode,
+          description: d.description || '',
+          desc2: d.desc2 || '',
+          qty: d.qty,
+          unitPrice: d.unitPrice,
+          amount: d.amount,
+          uom: d.uom,
+          taxCode: d.taxCode || '',
+          accNo: d.accNo,
+          itemGroup: d.itemGroup || ''
+        }))
+      },
+      createMissing: { items: [] }
+    };
+    await startSubmit(req);
   };
 
   const formatNumber = (num: number | string) => {
@@ -318,13 +481,48 @@ export default function PurchaseInvoiceTaskPage() {
     return Number(str.replace(/,/g, '')) || 0;
   };
 
+  const downloadOriginalHref = earlyDownloadUrl || earlyExternalLink || payload?.externalLink || null;
+
+  const statusLabel =
+    taskStatus === 'queued'
+      ? 'Queued'
+      : taskStatus === 'ocr_processing'
+        ? 'Reading'
+        : taskStatus === 'analyzing'
+          ? 'Drafting'
+          : taskStatus === 'canceled'
+            ? 'Cancelled'
+            : taskStatus === 'failed'
+              ? 'Failed'
+              : taskStatus === 'succeeded'
+                ? 'Ready'
+                : null;
+
   if (loading || !payload) {
     return (
       <div className="flex h-screen flex-col bg-white">
         <div className="flex shrink-0 items-center justify-between gap-4 border-b border-zinc-200/80 bg-white/80 px-6 py-4 backdrop-blur-md sticky top-0 z-10">
-          <h1 className="text-xl font-semibold tracking-tight text-zinc-950">Purchase invoice review draft</h1>
+          <div className="flex items-center gap-3">
+            <h1 className="text-xl font-semibold tracking-tight text-zinc-950">Purchase invoice review draft</h1>
+            {statusLabel ? (
+              <span className="inline-flex items-center rounded-full border border-zinc-200 bg-zinc-50 px-2.5 py-1 text-[11px] font-semibold text-zinc-600">
+                {statusLabel}
+              </span>
+            ) : null}
+          </div>
           <div className="flex items-center gap-3">
             <Link href="/purchase-invoice" className="rounded-xl px-4 py-2 text-sm font-medium text-zinc-600 transition hover:bg-zinc-100 hover:text-zinc-900">Back</Link>
+            {downloadOriginalHref ? (
+              <a
+                href={downloadOriginalHref}
+                target="_blank"
+                rel="noopener noreferrer"
+                className="inline-flex items-center gap-2 rounded-xl border border-zinc-200 bg-white px-4 py-2 text-sm font-medium text-zinc-900 transition hover:bg-zinc-50"
+              >
+                <Download className="h-4 w-4" />
+                Download Original
+              </a>
+            ) : null}
           </div>
         </div>
         <div className="flex-1 flex items-center justify-center">
@@ -352,7 +550,14 @@ export default function PurchaseInvoiceTaskPage() {
       <div className="flex h-screen flex-col bg-white font-sans text-zinc-900">
       {/* Header */}
       <div className="flex shrink-0 items-center justify-between gap-4 border-b border-zinc-200/80 bg-white/80 px-6 py-4 backdrop-blur-md sticky top-0 z-10">
-        <h1 className="text-xl font-semibold tracking-tight text-zinc-950">Purchase invoice review draft</h1>
+        <div className="flex items-center gap-3">
+          <h1 className="text-xl font-semibold tracking-tight text-zinc-950">Purchase invoice review draft</h1>
+          {statusLabel ? (
+            <span className="inline-flex items-center rounded-full border border-zinc-200 bg-zinc-50 px-2.5 py-1 text-[11px] font-semibold text-zinc-600">
+              {statusLabel}
+            </span>
+          ) : null}
+        </div>
 
         <div className="flex items-center gap-3">
           <Link
@@ -361,9 +566,9 @@ export default function PurchaseInvoiceTaskPage() {
           >
             Back
           </Link>
-          {payload.externalLink && (
+          {downloadOriginalHref && (
             <a
-              href={payload.externalLink}
+              href={downloadOriginalHref}
               target="_blank"
               rel="noopener noreferrer"
               className="inline-flex items-center gap-2 rounded-xl border border-zinc-200 bg-white px-4 py-2 text-sm font-medium text-zinc-900 transition hover:bg-zinc-50"
@@ -419,7 +624,15 @@ export default function PurchaseInvoiceTaskPage() {
                           value={creditorSearch}
                           onValueChange={setCreditorSearch}
                         />
-                        <CommandList>
+                        <CommandList
+                          className="max-h-72 overflow-auto"
+                          onScroll={(event) => {
+                            const target = event.currentTarget;
+                            if (target.scrollTop + target.clientHeight >= target.scrollHeight - 32) {
+                              void loadMoreCreditors();
+                            }
+                          }}
+                        >
                           {isCreditorLoading && <div className="p-4 text-xs text-center text-gray-500">Loading...</div>}
                           <CommandEmpty>No results found.</CommandEmpty>
                           <CommandGroup>
@@ -458,6 +671,9 @@ export default function PurchaseInvoiceTaskPage() {
                               </CommandItem>
                             )}
                           </CommandGroup>
+                          {isCreditorLoadingMore ? (
+                            <div className="p-3 text-xs text-center text-gray-500">Loading more...</div>
+                          ) : null}
                         </CommandList>
                       </Command>
                     </PopoverContent>
@@ -488,7 +704,15 @@ export default function PurchaseInvoiceTaskPage() {
                           value={agentSearch}
                           onValueChange={setAgentSearch}
                         />
-                        <CommandList>
+                        <CommandList
+                          className="max-h-72 overflow-auto"
+                          onScroll={(event) => {
+                            const target = event.currentTarget;
+                            if (target.scrollTop + target.clientHeight >= target.scrollHeight - 32) {
+                              void loadMoreAgents();
+                            }
+                          }}
+                        >
                           {isAgentLoading && <div className="p-4 text-xs text-center text-gray-500">Loading...</div>}
                           <CommandEmpty>No results found.</CommandEmpty>
                           <CommandGroup>
@@ -527,6 +751,9 @@ export default function PurchaseInvoiceTaskPage() {
                               </CommandItem>
                             )}
                           </CommandGroup>
+                          {isAgentLoadingMore ? (
+                            <div className="p-3 text-xs text-center text-gray-500">Loading more...</div>
+                          ) : null}
                         </CommandList>
                       </Command>
                     </PopoverContent>
@@ -696,7 +923,15 @@ export default function PurchaseInvoiceTaskPage() {
                                 value={stockSearch}
                                 onValueChange={setStockSearch}
                               />
-                              <CommandList>
+                              <CommandList
+                                className="max-h-72 overflow-auto"
+                                onScroll={(event) => {
+                                  const target = event.currentTarget;
+                                  if (target.scrollTop + target.clientHeight >= target.scrollHeight - 32) {
+                                    void loadMoreStocks();
+                                  }
+                                }}
+                              >
                                 {isStockLoading && <div className="p-4 text-xs text-center text-gray-500">Loading...</div>}
                                 <CommandEmpty>No stock found.</CommandEmpty>
                                 <CommandGroup>
@@ -719,6 +954,9 @@ export default function PurchaseInvoiceTaskPage() {
                                     </CommandItem>
                                   ))}
                                 </CommandGroup>
+                                {isStockLoadingMore ? (
+                                  <div className="p-3 text-xs text-center text-gray-500">Loading more...</div>
+                                ) : null}
                               </CommandList>
                             </Command>
                           </PopoverContent>

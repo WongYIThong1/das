@@ -74,7 +74,7 @@ export default function AuthGate({ children }: { children: ReactNode }) {
 
     if (isPublicAuthPath(pathname)) {
       if (isAuthenticated) {
-        router.replace('/home');
+        router.replace('/purchase-invoice');
       } else if ((pathname === '/totp' || pathname === '/toptp') && !pendingAuthFlow) {
         router.replace('/login');
       }

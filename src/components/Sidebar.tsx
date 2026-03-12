@@ -19,7 +19,6 @@ import { useAuth } from './AuthProvider';
 import { logout } from '../lib/auth-api';
 
 const routeByItem: Record<string, string> = {
-  home: '/home',
   'purchase-invoice': '/purchase-invoice',
   'creditor-manage': '/creditor-manage',
   'stock-manage': '/stock-manage',
@@ -31,19 +30,44 @@ const itemByRoute = Object.fromEntries(
 ) as Record<string, string>;
 
 function getItemFromPath(pathname: string) {
-  return itemByRoute[pathname] ?? 'home';
+  return itemByRoute[pathname] ?? 'purchase-invoice';
 }
 
 export function Sidebar() {
   const router = useRouter();
-  const pathname = usePathname() ?? '/home';
+  const pathname = usePathname() ?? '/purchase-invoice';
   const { profile, clearAuthState } = useAuth();
   const activeItem = getItemFromPath(pathname);
   const [isProfileMenuOpen, setIsProfileMenuOpen] = React.useState(false);
   const [isLogoutDialogOpen, setIsLogoutDialogOpen] = React.useState(false);
+  const profileMenuRef = React.useRef<HTMLDivElement>(null);
+
+  React.useEffect(() => {
+    if (!isProfileMenuOpen) return;
+
+    const handleClickOutside = (event: MouseEvent) => {
+      if (profileMenuRef.current && !profileMenuRef.current.contains(event.target as Node)) {
+        setIsProfileMenuOpen(false);
+      }
+    };
+
+    const handleKeyDown = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') {
+        setIsProfileMenuOpen(false);
+      }
+    };
+
+    document.addEventListener('mousedown', handleClickOutside);
+    document.addEventListener('keydown', handleKeyDown);
+    return () => {
+      document.removeEventListener('mousedown', handleClickOutside);
+      document.removeEventListener('keydown', handleKeyDown);
+    };
+  }, [isProfileMenuOpen]);
 
   const displayName = profile?.username ?? 'Workspace User';
   const displayEmail = profile?.email ?? 'No email';
+  const initial = (profile?.username?.[0] || profile?.email?.[0] || 'U').toUpperCase();
 
   const handleLogout = async () => {
     setIsLogoutDialogOpen(false);
@@ -56,12 +80,6 @@ export function Sidebar() {
     router.push('/login');
   };
   const menuGroups = [
-    {
-      label: null,
-      items: [
-        { id: 'home', label: 'Home', icon: Home },
-      ]
-    },
     {
       label: 'Procurement',
       items: [
@@ -120,7 +138,7 @@ export function Sidebar() {
                 return (
                   <button
                     key={item.id}
-                    onClick={() => router.push(routeByItem[item.id] ?? '/home')}
+                    onClick={() => router.push(routeByItem[item.id] ?? '/purchase-invoice')}
                     className={`relative w-full flex items-center gap-2.5 px-2 py-1.5 rounded-md text-[13px] font-medium transition-colors duration-200 group ${
                       isActive 
                         ? 'text-zinc-900' 
@@ -161,7 +179,7 @@ export function Sidebar() {
         ))}
       </div>
 
-      <div className="p-3 border-t border-zinc-100 relative">
+      <div className="p-3 border-t border-zinc-100 relative" ref={profileMenuRef}>
         <AnimatePresence>
           {isProfileMenuOpen && (
             <motion.div 
@@ -173,11 +191,9 @@ export function Sidebar() {
             >
               <div className="p-2 border-b border-zinc-100">
                 <div className="flex items-center gap-2 px-1 py-1.5">
-                  <img 
-                    src="https://picsum.photos/seed/user/100/100" 
-                    alt="User" 
-                    className="w-8 h-8 rounded-lg bg-zinc-200 object-cover"
-                  />
+                <div className="flex h-8 w-8 items-center justify-center rounded-lg bg-zinc-900 text-[13px] font-bold text-white shrink-0">
+                  {initial}
+                </div>
                   <div className="flex-1 min-w-0">
                     <div className="text-sm font-semibold text-zinc-900 truncate">{displayName}</div>
                     <div className="text-xs text-zinc-500 truncate">{displayEmail}</div>
@@ -225,11 +241,9 @@ export function Sidebar() {
           className={`w-full flex items-center gap-2 p-2 rounded-lg transition-colors text-left group ${isProfileMenuOpen ? 'bg-zinc-100' : 'hover:bg-zinc-50'}`}
         >
           <div className="relative">
-            <img 
-              src="https://picsum.photos/seed/user/100/100" 
-              alt="User" 
-              className="w-8 h-8 rounded-lg bg-zinc-200 object-cover ring-1 ring-zinc-200"
-            />
+            <div className="flex h-8 w-8 items-center justify-center rounded-lg bg-zinc-900 text-[13px] font-bold text-white ring-1 ring-zinc-200 shrink-0">
+              {initial}
+            </div>
             <div className="absolute -bottom-0.5 -right-0.5 w-3 h-3 bg-emerald-500 rounded-full border-2 border-white" />
           </div>
           <div className="flex-1 min-w-0">

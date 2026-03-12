@@ -1,7 +1,7 @@
 'use client';
 
 import React, { useCallback, useEffect, useMemo, useState } from 'react';
-import { X, UploadCloud, FileText, Loader2, AlertCircle, Sparkles, CheckCircle2, ScanText, Wand2, CircleStop } from 'lucide-react';
+import { X, UploadCloud, FileText, Loader2, AlertCircle, Sparkles, CheckCircle2, ScanText, Wand2, CircleStop, Download } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
 import { toast } from 'sonner';
 import { ApiRequestError } from '../lib/auth-api';
@@ -48,8 +48,11 @@ export function UploadInvoiceModal({ isOpen, onClose, onSuccess }: UploadInvoice
   const [progress, setProgress] = useState(0);
   const [error, setError] = useState<string | null>(null);
   const [taskStatus, setTaskStatus] = useState<PreviewTaskStatus | null>(null);
+  const [earlyDownloadUrl, setEarlyDownloadUrl] = useState<string | null>(null);
+  const [earlyExternalLink, setEarlyExternalLink] = useState<string | null>(null);
   const uploadAbortRef = React.useRef<AbortController | null>(null);
   const previewTaskIdRef = React.useRef<string | null>(null);
+  const cancelHandledRef = React.useRef(false);
 
   const resetState = useCallback(() => {
     setFile(null);
@@ -58,6 +61,8 @@ export function UploadInvoiceModal({ isOpen, onClose, onSuccess }: UploadInvoice
     setProgress(0);
     setError(null);
     setTaskStatus(null);
+    setEarlyDownloadUrl(null);
+    setEarlyExternalLink(null);
     uploadAbortRef.current?.abort();
     uploadAbortRef.current = null;
     previewTaskIdRef.current = null;
@@ -66,6 +71,7 @@ export function UploadInvoiceModal({ isOpen, onClose, onSuccess }: UploadInvoice
   useEffect(() => {
     // Always start the modal from a clean state.
     if (isOpen) {
+      cancelHandledRef.current = false;
       resetState();
       return;
     }
@@ -89,6 +95,8 @@ export function UploadInvoiceModal({ isOpen, onClose, onSuccess }: UploadInvoice
         return ['AI reading files', 'Reading the invoice and extracting its contents.', 48] as const;
       case 'analyzing':
         return ['AI building draft', 'Matching creditor, agent, tax code, and line items.', 76] as const;
+      case 'canceled':
+        return ['Cancelled', 'This draft was cancelled. You can upload a different invoice anytime.', 100] as const;
       case 'succeeded':
         return ['Preview ready', 'The review draft is ready and will open automatically.', 100] as const;
       case 'failed':
@@ -161,6 +169,11 @@ export function UploadInvoiceModal({ isOpen, onClose, onSuccess }: UploadInvoice
           chip: 'border-teal-200 bg-teal-50 text-teal-800',
           subtle: 'text-teal-800',
         } as const;
+      case 'canceled':
+        return {
+          chip: 'border-red-200 bg-red-50 text-red-700',
+          subtle: 'text-red-700',
+        } as const;
       case 'succeeded':
         return {
           chip: 'border-emerald-200 bg-emerald-50 text-emerald-800',
@@ -185,6 +198,8 @@ export function UploadInvoiceModal({ isOpen, onClose, onSuccess }: UploadInvoice
         return 'AI reading files';
       case 'analyzing':
         return 'AI building draft';
+      case 'canceled':
+        return 'Cancelled';
       case 'succeeded':
         return 'Ready';
       case 'failed':
@@ -226,6 +241,13 @@ export function UploadInvoiceModal({ isOpen, onClose, onSuccess }: UploadInvoice
           ink: 'text-sky-800',
           bar: 'bg-sky-600',
         } as const;
+      case 'canceled':
+        return {
+          icon: CircleStop,
+          ring: 'from-red-200 via-rose-100 to-zinc-100',
+          ink: 'text-red-700',
+          bar: 'bg-red-600',
+        } as const;
       case 'succeeded':
         return {
           icon: CheckCircle2,
@@ -242,6 +264,8 @@ export function UploadInvoiceModal({ isOpen, onClose, onSuccess }: UploadInvoice
         } as const;
     }
   }, [error, taskStatus]);
+
+  const downloadOriginalHref = earlyDownloadUrl || earlyExternalLink;
 
   const applyFile = useCallback((nextFile: File | null) => {
     if (!nextFile) {
@@ -301,13 +325,16 @@ export function UploadInvoiceModal({ isOpen, onClose, onSuccess }: UploadInvoice
 
     const controller = new AbortController();
     uploadAbortRef.current = controller;
+    cancelHandledRef.current = false;
     setIsUploading(true);
     setProgress(8);
     setError(null);
     setTaskStatus(null);
+    setEarlyDownloadUrl(null);
+    setEarlyExternalLink(null);
 
     try {
-      const task = await createPurchaseInvoicePreviewTask(file);
+      const task = await createPurchaseInvoicePreviewTask(file, { signal: controller.signal });
       previewTaskIdRef.current = task.taskId;
       setTaskStatus(task.status);
       setProgress(24);
@@ -316,12 +343,20 @@ export function UploadInvoiceModal({ isOpen, onClose, onSuccess }: UploadInvoice
         signal: controller.signal,
         onProgress: (nextTask) => {
           setTaskStatus(nextTask.status);
+          if (nextTask.file?.downloadUrl) {
+            setEarlyDownloadUrl(nextTask.file.downloadUrl);
+          }
+          if (nextTask.externalLink) {
+            setEarlyExternalLink(nextTask.externalLink);
+          }
           if (nextTask.status === 'queued') {
             setProgress(24);
           } else if (nextTask.status === 'ocr_processing') {
             setProgress(52);
           } else if (nextTask.status === 'analyzing') {
             setProgress(82);
+          } else if (nextTask.status === 'canceled') {
+            setProgress(100);
           } else if (nextTask.status === 'succeeded') {
             setProgress(100);
           }
@@ -338,15 +373,38 @@ export function UploadInvoiceModal({ isOpen, onClose, onSuccess }: UploadInvoice
         setTaskStatus(null);
       }, 180);
     } catch (uploadError) {
+      if (uploadError instanceof DOMException && uploadError.name === 'AbortError') {
+        setIsUploading(false);
+        setProgress(0);
+        setTaskStatus(null);
+        setError(null);
+        if (!cancelHandledRef.current) {
+          onClose();
+          toast.message('Cancelled. You can upload a different invoice anytime.', {
+            icon: <CircleStop size={18} className="text-red-500" />,
+          });
+        }
+        return;
+      }
+      if (uploadError instanceof ApiRequestError && uploadError.status === 499) {
+        setIsUploading(false);
+        setProgress(0);
+        setTaskStatus(null);
+        setError(null);
+        if (!cancelHandledRef.current) {
+          onClose();
+          toast.message('Cancelled. You can upload a different invoice anytime.', {
+            icon: <CircleStop size={18} className="text-red-500" />,
+          });
+        }
+        return;
+      }
+
       setIsUploading(false);
       setProgress(0);
       setTaskStatus('failed');
       const message = getErrorMessage(uploadError, 'Preview failed. Please try another file.');
       setError(message);
-      if (uploadError instanceof ApiRequestError && uploadError.status === 499) {
-        setError(null);
-        return;
-      }
       if (uploadError instanceof ApiRequestError && uploadError.status === 401) {
         toast.error('Session expired. Please sign in again.');
         onClose();
@@ -359,6 +417,7 @@ export function UploadInvoiceModal({ isOpen, onClose, onSuccess }: UploadInvoice
   };
 
   const handleCancelUpload = () => {
+    cancelHandledRef.current = true;
     uploadAbortRef.current?.abort();
     uploadAbortRef.current = null;
 
@@ -524,6 +583,18 @@ export function UploadInvoiceModal({ isOpen, onClose, onSuccess }: UploadInvoice
                           />
                         </div>
                       </div>
+
+                      {downloadOriginalHref ? (
+                        <a
+                          href={downloadOriginalHref}
+                          target="_blank"
+                          rel="noopener noreferrer"
+                          className="mt-4 inline-flex items-center gap-2 rounded-lg border border-zinc-200 bg-white px-3 py-2 text-xs font-medium text-zinc-700 transition hover:bg-zinc-50"
+                        >
+                          <Download size={14} className="text-zinc-600" />
+                          Download original
+                        </a>
+                      ) : null}
                     </div>
                   </motion.div>
                 ) : (

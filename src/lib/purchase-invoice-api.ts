@@ -1,7 +1,7 @@
 import { ApiRequestError } from './auth-api';
 
 export type PurchaseInvoiceListItem = {
-  docId: number;
+  supplierInvoiceNo: string;
   supplier: string;
   agent: string;
   currency: string;

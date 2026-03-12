@@ -164,11 +164,9 @@ const res = await fetch("/purchase-invoice/submit", {
 ### `payload.externalLink`
 
 `rules.md/create.md` 要求下游创建 PI 时 `payload.externalLink` 必须非空（用于写入 PI/APInvoice 的 ExternalLink 字段）。  
-但浏览器上传拿不到用户机器上的真实文件路径，所以当前后端会自动补一个稳定占位值：
+浏览器上传拿不到用户机器上的真实文件路径，所以我们使用 FileServer 返回的永久下载 URL。
 
-- `upload:{previewTaskId}:{originalFileName}`
-
-如果 preview 阶段配置了 FileServer 并成功上传，后端会优先使用 preview 返回的：
+如果 preview 阶段配置了 FileServer 并成功上传，后端会使用 preview 返回的：
 
 - `result.payload.externalLink`（FileServer 的 `downloadUrl`）
 
@@ -177,7 +175,7 @@ const res = await fetch("/purchase-invoice/submit", {
 - `pending/scanning/ready`：允许提交
 - `infected/scan_error`：直接阻止提交（返回 400）
 
-因此前端暂时不需要自己传 `externalLink`（即使不传，后端也会自动填充/选用 FileServer link）。
+因此前端暂时不需要自己传 `externalLink`；但 submit 要求最终必须是一个合法的 http(s) URL（通常来自 preview 的 FileServer link）。
 
 示例：
 

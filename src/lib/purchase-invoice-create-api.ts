@@ -1,6 +1,6 @@
 import { ApiRequestError } from './auth-api';
 
-export type PreviewTaskStatus = 'queued' | 'ocr_processing' | 'analyzing' | 'succeeded' | 'failed';
+export type PreviewTaskStatus = 'queued' | 'ocr_processing' | 'analyzing' | 'succeeded' | 'failed' | 'canceled';
 export type PreviewMatchStatus = 'matched' | 'review' | 'unmatched';
 
 export type PreviewWarningCode =
@@ -14,6 +14,15 @@ export type PreviewWarningCode =
   | 'item_not_matched'
   | 'item_needs_review'
   | string;
+
+export type PreviewWarningObject = Record<string, unknown> & {
+  code: string;
+  message?: string;
+  line?: number;
+  critical?: boolean;
+};
+
+export type PreviewWarning = PreviewWarningCode | PreviewWarningObject;
 
 export type PreviewCandidate = Record<string, unknown> & {
   code?: string;
@@ -115,7 +124,7 @@ export type PurchaseInvoicePreviewResponse = {
   taskId?: string;
   success?: boolean;
   payload: PurchaseInvoicePreviewPayload;
-  warnings: PreviewWarningCode[];
+  warnings: PreviewWarning[];
   file?: PurchaseInvoicePreviewFile;
   matches: PurchaseInvoicePreviewMatches;
   extracted?: PurchaseInvoicePreviewExtracted;
@@ -133,6 +142,10 @@ export type PurchaseInvoicePreviewTaskCreateResponse = {
 export type PurchaseInvoicePreviewTaskResponse = {
   taskId: string;
   status: PreviewTaskStatus;
+  // The backend may return these early (even before `result`) so the UI can
+  // offer "Download original" while the preview task is still running.
+  externalLink?: string;
+  file?: PurchaseInvoicePreviewFile;
   result?: PurchaseInvoicePreviewResponse;
   error?: string;
 };
@@ -146,11 +159,59 @@ export async function parseApiError(response: Response) {
   }
 }
 
-export async function getCreditorOptions(params?: { search?: string; page?: number; pageSize?: number }) {
+export type PurchaseInvoicePickerPage<T> = {
+  page: number;
+  pageSize: number;
+  total: number;
+  totalPages: number;
+  bookId: string;
+  company: string;
+  items: T[];
+};
+
+export type PurchaseInvoiceCreditorOption = {
+  accNo: string;
+  companyName: string;
+  currency: string;
+};
+
+export type PurchaseInvoiceAgentOption = {
+  code: string;
+  description: string;
+};
+
+export type PurchaseInvoiceStockOption = {
+  itemCode: string;
+  description: string;
+  group: string;
+};
+
+type PickerParams = {
+  search?: string;
+  page?: number;
+  pageSize?: number;
+};
+
+function clampPageSize(pageSize: number) {
+  return Math.max(1, Math.min(50, pageSize));
+}
+
+function buildPickerQuery(params?: PickerParams) {
   const query = new URLSearchParams();
-  if (params?.search) query.append('search', params.search);
-  if (params?.page) query.append('page', String(params.page));
-  if (params?.pageSize) query.append('pageSize', String(params.pageSize));
+  const page = Math.max(1, params?.page ?? 1);
+  const pageSize = clampPageSize(params?.pageSize ?? 20);
+
+  query.set('page', String(page));
+  query.set('pageSize', String(pageSize));
+  if (params?.search?.trim()) {
+    query.set('search', params.search.trim());
+  }
+
+  return query;
+}
+
+export async function getCreditorOptions(params?: PickerParams) {
+  const query = buildPickerQuery(params);
 
   const response = await fetch(`/purchase-invoice/creditor/options?${query.toString()}`, {
     method: 'GET',
@@ -161,14 +222,11 @@ export async function getCreditorOptions(params?: { search?: string; page?: numb
     throw new ApiRequestError(await parseApiError(response), response.status);
   }
 
-  return await response.json();
+  return (await response.json()) as PurchaseInvoicePickerPage<PurchaseInvoiceCreditorOption>;
 }
 
-export async function getAgentOptions(params?: { search?: string; page?: number; pageSize?: number }) {
-  const query = new URLSearchParams();
-  if (params?.search) query.append('search', params.search);
-  if (params?.page) query.append('page', String(params.page));
-  if (params?.pageSize) query.append('pageSize', String(params.pageSize));
+export async function getAgentOptions(params?: PickerParams) {
+  const query = buildPickerQuery(params);
 
   const response = await fetch(`/purchase-invoice/agent/options?${query.toString()}`, {
     method: 'GET',
@@ -179,14 +237,11 @@ export async function getAgentOptions(params?: { search?: string; page?: number;
     throw new ApiRequestError(await parseApiError(response), response.status);
   }
 
-  return await response.json();
+  return (await response.json()) as PurchaseInvoicePickerPage<PurchaseInvoiceAgentOption>;
 }
 
-export async function getStockOptions(params?: { search?: string; page?: number; pageSize?: number }) {
-  const query = new URLSearchParams();
-  if (params?.search) query.append('search', params.search);
-  if (params?.page) query.append('page', String(params.page));
-  if (params?.pageSize) query.append('pageSize', String(params.pageSize));
+export async function getStockOptions(params?: PickerParams) {
+  const query = buildPickerQuery(params);
 
   const response = await fetch(`/purchase-invoice/stock/options?${query.toString()}`, {
     method: 'GET',
@@ -197,10 +252,10 @@ export async function getStockOptions(params?: { search?: string; page?: number;
     throw new ApiRequestError(await parseApiError(response), response.status);
   }
 
-  return await response.json();
+  return (await response.json()) as PurchaseInvoicePickerPage<PurchaseInvoiceStockOption>;
 }
 
-export async function createPurchaseInvoicePreviewTask(file: File) {
+export async function createPurchaseInvoicePreviewTask(file: File, options?: { signal?: AbortSignal }) {
   const formData = new FormData();
   formData.append('file', file);
 
@@ -208,6 +263,7 @@ export async function createPurchaseInvoicePreviewTask(file: File) {
     method: 'POST',
     body: formData,
     credentials: 'include',
+    signal: options?.signal,
   });
 
   if (!response.ok) {
@@ -217,10 +273,11 @@ export async function createPurchaseInvoicePreviewTask(file: File) {
   return (await response.json()) as PurchaseInvoicePreviewTaskCreateResponse;
 }
 
-export async function getPurchaseInvoicePreviewTask(taskId: string) {
+export async function getPurchaseInvoicePreviewTask(taskId: string, options?: { signal?: AbortSignal }) {
   const response = await fetch(`/purchase-invoice/create/${taskId}`, {
     method: 'GET',
     credentials: 'include',
+    signal: options?.signal,
   });
 
   if (!response.ok) {
@@ -261,8 +318,12 @@ export async function waitForPurchaseInvoicePreview(
     if (options?.signal?.aborted) {
       throw new ApiRequestError('Preview cancelled.', 499);
     }
-    const task = await getPurchaseInvoicePreviewTask(taskId);
+    const task = await getPurchaseInvoicePreviewTask(taskId, { signal: options?.signal });
     options?.onProgress?.(task);
+
+    if (task.status === 'canceled') {
+      throw new ApiRequestError('Preview cancelled.', 499);
+    }
 
     if (task.status === 'succeeded' && task.result) {
       return {

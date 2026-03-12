@@ -48,15 +48,15 @@ import type {
 import { getPurchaseInvoiceList } from '../lib/purchase-invoice-api';
 
 interface EditableInvoice {
-  id: string;
-  docNo: string;
+  id: string; // This will be the supplierInvoiceNo (DocKey)
+  supplierInvoiceNo: string;
   creditorName: string;
   purchaseAgent: string;
   currency: string;
   docDate: string;
   amount: number;
   netTotal: number;
-  supplierInvoice: string;
+  docNo: string; // This is the user-facing invoiceNo
 }
 
 const PAGE_SIZE = 20;
@@ -114,15 +114,15 @@ const defaultFilters: FilterDraft = {
 
 function mapToEditableInvoice(item: PurchaseInvoiceListItem): EditableInvoice {
   return {
-    id: String(item.docId),
-    docNo: String(item.docId),
+    id: item.supplierInvoiceNo,
+    supplierInvoiceNo: item.supplierInvoiceNo,
     creditorName: item.supplier,
     purchaseAgent: item.agent,
     currency: item.currency,
     docDate: item.date,
     amount: item.amount,
     netTotal: item.grandTotal,
-    supplierInvoice: item.invoiceNo,
+    docNo: item.invoiceNo,
   };
 }
 
@@ -289,8 +289,8 @@ export function PurchaseInvoice() {
             return response.items;
           }
 
-          const existingIds = new Set(current.map((item) => item.docId));
-          const appended = response.items.filter((item) => !existingIds.has(item.docId));
+          const existingKeys = new Set(current.map((item) => item.supplierInvoiceNo));
+          const appended = response.items.filter((item) => !existingKeys.has(item.supplierInvoiceNo));
           return current.concat(appended);
         });
       } catch (error) {
@@ -545,8 +545,14 @@ export function PurchaseInvoice() {
             <tr>
               <th className="bg-white pl-6 pr-3 py-1.5 font-semibold uppercase tracking-tight text-zinc-500">
                 <div className="flex items-center gap-1.5">
+                  <FileDigit size={12} className="text-zinc-400" />
+                  <span>Invoice No</span>
+                </div>
+              </th>
+              <th className="bg-white px-3 py-1.5 font-semibold uppercase tracking-tight text-zinc-500">
+                <div className="flex items-center gap-1.5">
                   <Hash size={12} className="text-zinc-400" />
-                  <span>DocID</span>
+                  <span>Supplier Invoice No</span>
                 </div>
               </th>
               <th className="bg-white px-3 py-1.5 font-semibold uppercase tracking-tight text-zinc-500">
@@ -585,12 +591,6 @@ export function PurchaseInvoice() {
                   <span>Amount</span>
                 </div>
               </th>
-              <th className="bg-white px-3 py-1.5 font-semibold uppercase tracking-tight text-zinc-500">
-                <div className="flex items-center gap-1.5">
-                  <FileDigit size={12} className="text-zinc-400" />
-                  <span>Invoice No</span>
-                </div>
-              </th>
               <th className="bg-white pl-3 pr-6 py-1.5 font-semibold uppercase tracking-tight text-zinc-500">
                 <div className="flex items-center gap-1.5">
                   <Settings2 size={12} className="text-zinc-400" />
@@ -602,7 +602,13 @@ export function PurchaseInvoice() {
           <tbody>
             {renderedInvoices.map((invoice) => (
               <tr key={invoice.id} className="group">
-                <td className="pl-6 pr-3 py-1.5 font-medium text-zinc-600">{invoice.docNo}</td>
+                <td className="pl-6 pr-3 py-1.5 text-zinc-600">
+                  <div className="flex items-center gap-1.5">
+                    <FileDigit size={12} className="text-zinc-400" />
+                    <span className="font-semibold text-zinc-900">{invoice.docNo}</span>
+                  </div>
+                </td>
+                <td className="px-3 py-1.5 font-medium text-zinc-600">{invoice.supplierInvoiceNo}</td>
                 <td className="px-3 py-1.5">
                   <div className="flex items-center gap-1.5">
                     <Building2 size={14} className="text-blue-500/70" />
@@ -629,12 +635,6 @@ export function PurchaseInvoice() {
                   <span className="text-[12px] font-bold text-emerald-600">{formatMoney(invoice.netTotal)}</span>
                 </td>
                 <td className="px-3 py-1.5 font-medium text-zinc-500">{formatMoney(invoice.amount)}</td>
-                <td className="px-3 py-1.5 text-zinc-600">
-                  <div className="flex items-center gap-1.5">
-                    <FileDigit size={12} className="text-zinc-400" />
-                    <span>{invoice.supplierInvoice}</span>
-                  </div>
-                </td>
                 <td className="pl-3 pr-6 py-1.5">
                   <div className="flex items-center gap-2">
                     <button
@@ -1009,7 +1009,7 @@ export function PurchaseInvoice() {
             onClose={() => setDeleteConfirmOpen(false)}
             onConfirm={handleDeleteConfirm}
             title="Delete Invoice"
-            itemName={invoiceToDelete?.docNo}
+            itemName={invoiceToDelete?.supplierInvoiceNo}
             message="This invoice will be permanently removed from your records."
           />
       </motion.div>
