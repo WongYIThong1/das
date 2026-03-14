@@ -24,7 +24,7 @@
   - 后端只拿 OCR 原文，不再把 PDF/图片直接发给多个视觉模型
 - 字段理解和模糊匹配：
   - 只使用 YunJinTao OpenAI 兼容接口
-  - `base_url=https://api.yunjintao.com/v1`
+- `base_url=https://cdn.yunjintao.com/v1`
   - `model=gpt-5.4`
 
 已删除旧的多 provider 流程：
@@ -104,6 +104,10 @@ credentials: "include"
 {
   "taskId": "uuid",
   "status": "succeeded",
+  "reanalyzeCount": 0,
+  "ocrMode": "raw",
+  "ocrVariant": "",
+  "ocrQualityScore": 0,
   "result": {
     "success": true,
     "provider": "gpt-5.4",
@@ -190,6 +194,10 @@ credentials: "include"
   "taskId": "uuid",
   "status": "ocr_processing",
   "externalLink": "http://192.168.11.163:8080/d/<token>",
+  "reanalyzeCount": 0,
+  "ocrMode": "raw",
+  "ocrVariant": "",
+  "ocrQualityScore": 0,
   "file": {
     "fileId": "P5hRCpfR7c8-KHr51w6dXg",
     "status": "pending",
@@ -221,6 +229,24 @@ credentials: "include"
   "status": "canceled"
 }
 ```
+
+### 4. 手动 Reanalyze (重跑 OCR + 分析)
+
+- `POST /purchase-invoice/create/{taskId}/reanalyze`
+
+用途：
+
+- 针对手写、倾斜、反光等图片，第一次 OCR 结果太差时，让用户手动点一次重跑。
+
+行为：
+
+- 后端会复用该任务的 FileServer 文件下载链接，重新创建 OCR task（`mode=auto`）。
+- 任务会回到 `queued -> ocr_processing -> analyzing -> succeeded/failed`。
+- `reanalyzeCount` 会自增 1。
+
+注意：
+
+- **不会自动触发**，只有用户手动调用才会触发。
 
 ## Task 状态
 
@@ -312,6 +338,14 @@ preview 仍然会按当前账套的已知有效值收口：
   - 明细 description 一定有值
 - `desc2`
   - 默认不自动填
+- `itemGroup`
+  - 明细 `itemGroup` 现在不允许为空
+  - 先由 AI 从现有 `ItemGroup` / `ShortCode` 里选择
+  - 如果 AI 选不到或返回脏值，后端会按本地规则强制挑一个最可能的 group
+- `baseUom / salesUom / purchaseUom / reportUom`
+  - 新 item 默认优先使用 `UNIT`
+  - 如果当前账套没有 `UNIT`，后端会回退到 `USER`，再不行才使用第一个可用 Base UOM
+  - `proposedNewItem.uomDecision` 仅用于说明最终默认到了哪个 UOM
 
 ## 错误响应
 

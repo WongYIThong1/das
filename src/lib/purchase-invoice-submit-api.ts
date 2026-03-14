@@ -27,17 +27,6 @@ export type PurchaseInvoiceSubmitPayload = {
   details: PurchaseInvoiceSubmitDetail[];
 };
 
-export type PurchaseInvoiceCreateMissingCreditorPayload = {
-  code: string;
-  companyName: string;
-  currency: string;
-  type: string;
-  phone: string;
-  area: string;
-  agent: string;
-  active: boolean;
-};
-
 export type PurchaseInvoiceCreateMissingItemPayload = {
   itemCode: string;
   description: string;
@@ -46,6 +35,7 @@ export type PurchaseInvoiceCreateMissingItemPayload = {
   salesUom: string;
   purchaseUom: string;
   reportUom: string;
+  uomConfirmed?: boolean;
   stockControl: boolean;
   hasSerialNo: boolean;
   hasBatchNo: boolean;
@@ -59,10 +49,6 @@ export type PurchaseInvoiceSubmitRequest = {
   previewTaskId: string;
   payload: PurchaseInvoiceSubmitPayload;
   createMissing?: {
-    creditor?: {
-      enabled: boolean;
-      payload: PurchaseInvoiceCreateMissingCreditorPayload;
-    };
     items?: Array<{
       line: number;
       enabled: boolean;

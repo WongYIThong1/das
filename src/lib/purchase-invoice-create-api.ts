@@ -45,6 +45,12 @@ export type PreviewProposedNewItem = Record<string, unknown> & {
   salesUom?: string;
   purchaseUom?: string;
   reportUom?: string;
+  uomDecision?: {
+    selectedUom: string;
+    confidence: number;
+    reason: string;
+    reviewRequired: boolean;
+  };
   itemType?: string;
   stockControl?: boolean;
   hasSerialNo?: boolean;
@@ -299,6 +305,19 @@ export async function cancelPurchaseInvoicePreviewTask(taskId: string) {
   }
 
   return true;
+}
+
+export async function reanalyzePurchaseInvoicePreviewTask(taskId: string) {
+  const response = await safeFetch(`/purchase-invoice/create/${taskId}/reanalyze`, {
+    method: 'POST',
+    credentials: 'include',
+  });
+
+  if (!response.ok) {
+    throw new ApiRequestError(await parseApiError(response), response.status);
+  }
+
+  return (await response.json()) as PurchaseInvoicePreviewTaskResponse;
 }
 
 export async function waitForPurchaseInvoicePreview(

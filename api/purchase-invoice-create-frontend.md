@@ -14,6 +14,7 @@
 1. `POST /purchase-invoice/create`
 2. `GET /purchase-invoice/create/{taskId}`
 3. `POST /purchase-invoice/create/{taskId}/cancel`
+4. `POST /purchase-invoice/create/{taskId}/reanalyze`
 
 都要求：
 
@@ -140,6 +141,18 @@ async function waitForPurchaseInvoicePreview(taskId, {
 
 - `POST /purchase-invoice/create/${taskId}/cancel`
 - 取消后前端应停止轮询，并提示用户可以重新上传
+
+## Reanalyze (手动重跑 OCR)
+
+当用户发现 OCR 识别不准，允许点击一次按钮触发重跑：
+
+- `POST /purchase-invoice/create/${taskId}/reanalyze`
+
+注意：
+
+- **不会自动触发**，只有用户手动点按钮才会触发。
+- 后端会复用同一份 FileServer 文件，重新创建一个 OCR task（`mode=auto`），并把任务状态重置成 `queued`。
+- 前端收到 `202` 后继续轮询 `GET /purchase-invoice/create/{taskId}` 即可。
 
 ## 成功结果怎么用
 

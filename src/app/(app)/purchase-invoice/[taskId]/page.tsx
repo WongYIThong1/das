@@ -6,6 +6,7 @@ import Link from 'next/link';
 import { useParams, useRouter } from 'next/navigation';
 import { toast } from 'sonner';
 import { format } from 'date-fns';
+import { RefreshCcw } from 'lucide-react';
 
 import { Select, SelectContent, SelectGroup, SelectItem, SelectLabel, SelectScrollDownButton, SelectScrollUpButton, SelectSeparator, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
@@ -22,6 +23,7 @@ import { waitForPurchaseInvoicePreview, type PreviewTaskStatus, PurchaseInvoiceP
 import { getPurchaseInvoiceList } from '../../../../lib/purchase-invoice-api';
 import { type PurchaseInvoiceSubmitRequest } from '../../../../lib/purchase-invoice-submit-api';
 import { useSubmit } from '../../../../components/SubmitProvider';
+import { usePreviewProgress } from '../../../../components/PreviewProgressProvider';
 
 export default function PurchaseInvoiceTaskPage() {
   const params = useParams();
@@ -29,6 +31,7 @@ export default function PurchaseInvoiceTaskPage() {
   const taskId = params.taskId as string;
 
   const { startSubmit, isRunning: submitting } = useSubmit();
+  const { startReanalyze, isRunning: reanalyzeRunning } = usePreviewProgress();
   const [loading, setLoading] = useState(true);
   const [loadError, setLoadError] = useState<string | null>(null);
   const [loadNonce, setLoadNonce] = useState(0);
@@ -42,8 +45,6 @@ export default function PurchaseInvoiceTaskPage() {
   const [existingInvoiceNo, setExistingInvoiceNo] = useState<string | null>(null);
   const [existingInvoiceCheckError, setExistingInvoiceCheckError] = useState<string | null>(null);
 
-  // createMissing toggle states
-  const [createCreditorEnabled, setCreateCreditorEnabled] = useState(false);
   const [createItemsEnabled, setCreateItemsEnabled] = useState<Record<number, boolean>>({});
 
   // Search/Picker states
@@ -103,9 +104,6 @@ export default function PurchaseInvoiceTaskPage() {
 
           // Auto-enable createMissing toggles based on empty codes
           const p = res.payload as PurchaseInvoicePreviewPayload;
-          if (!p.creditorCode && previewMatches.creditor) {
-            setCreateCreditorEnabled(true);
-          }
           const itemToggles: Record<number, boolean> = {};
           p.details.forEach((d: PurchaseInvoicePreviewDetail, i: number) => {
             if (!d.itemCode && previewMatches.items?.[i]?.proposedNewItem) {
@@ -113,6 +111,22 @@ export default function PurchaseInvoiceTaskPage() {
             }
           });
           setCreateItemsEnabled(itemToggles);
+
+          // If the backend suggested a new item and we auto-enabled create, fill the row inputs
+          // so users can review/edit inline (instead of showing "Create: NEWITEM" text).
+          const nextDetails = p.details.map((d, i) => {
+            if (!itemToggles[i]) return d;
+            const proposed = (previewMatches.items?.[i]?.proposedNewItem || {}) as PreviewProposedNewItem;
+            return {
+              ...d,
+              itemCode: String(proposed.itemCodeSuggestion || d.itemCode || ''),
+              itemGroup: String(proposed.itemGroup || d.itemGroup || ''),
+              description: String(proposed.description || d.description || ''),
+              desc2: String((proposed as any).desc2 || d.desc2 || ''),
+              uom: String(proposed.purchaseUom || proposed.baseUom || d.uom || 'UNIT'),
+            } satisfies PurchaseInvoicePreviewDetail;
+          });
+          setPayload({ ...p, details: nextDetails });
 
           setLoading(false);
         }
@@ -172,6 +186,31 @@ export default function PurchaseInvoiceTaskPage() {
   }, [payload?.supplierInvoiceNo]);
 
   const alreadySubmitted = Boolean(existingInvoiceNo);
+
+  const handleReanalyze = async () => {
+    if (reanalyzeRunning) return;
+    if (!taskId) return;
+
+    try {
+      toast.message('Reanalyzing invoice. This can take a moment…');
+      const finalStatus = await startReanalyze({
+        taskId,
+        fileName: null,
+        onProgress: (res) => {
+          setTaskStatus(res.status);
+          if (res.file?.downloadUrl) setEarlyDownloadUrl(res.file.downloadUrl);
+          if (res.externalLink) setEarlyExternalLink(res.externalLink);
+        },
+      });
+
+      if (finalStatus === 'succeeded') {
+        setLoadNonce((current) => current + 1);
+      }
+    } catch (error) {
+      const message = error instanceof Error && error.message ? error.message : 'Failed to reanalyze invoice.';
+      toast.error(message);
+    }
+  };
 
   // Preload picker options as soon as the user enters the page, so the first open
   // of the dropdown is instant (no need to type before seeing options).
@@ -478,6 +517,43 @@ export default function PurchaseInvoiceTaskPage() {
     }
   };
 
+  const applyProposedNewItemToLine = (lineIndex: number, enabled: boolean) => {
+    setPayload((prev) => {
+      if (!prev) return prev;
+      const proposed = (matches.items?.[lineIndex]?.proposedNewItem || {}) as PreviewProposedNewItem;
+      const newDetails = [...prev.details];
+      const current = newDetails[lineIndex];
+      if (!current) return prev;
+
+      if (!enabled) {
+        // Switching off "Create": allow selecting an existing stock item again.
+        newDetails[lineIndex] = {
+          ...current,
+          itemCode: '',
+        };
+        return { ...prev, details: newDetails };
+      }
+
+      const suggestedCode = String(proposed.itemCodeSuggestion || '').trim();
+      const suggestedGroup = String(proposed.itemGroup || current.itemGroup || '').trim();
+      const suggestedDesc = String(proposed.description || current.description || '').trim();
+      const suggestedDesc2 = String(proposed.desc2 || current.desc2 || '').trim();
+      const suggestedUom = String(proposed.purchaseUom || proposed.baseUom || current.uom || 'UNIT').trim();
+
+      newDetails[lineIndex] = {
+        ...current,
+        // Fill into the row so the user can see/edit it inline.
+        itemCode: suggestedCode,
+        itemGroup: suggestedGroup,
+        description: suggestedDesc,
+        desc2: suggestedDesc2,
+        uom: suggestedUom,
+      };
+
+      return { ...prev, details: newDetails };
+    });
+  };
+
   const addItem = () => {
     setPayload((prev) => {
       if (!prev) return prev;
@@ -522,40 +598,23 @@ export default function PurchaseInvoiceTaskPage() {
     // Build createMissing from toggle states
     const createMissing: PurchaseInvoiceSubmitRequest['createMissing'] = {};
 
-    // Creditor
-    if (createCreditorEnabled && !payload.creditorCode && matches.creditor) {
-      const candidate = matches.creditor.candidate || ({} as Record<string, unknown>);
-      createMissing.creditor = {
-        enabled: true,
-        payload: {
-          code: String(candidate.code || candidate.accNo || ''),
-          companyName: String(candidate.companyName || candidate.name || ''),
-          currency: String(candidate.currency || payload.currencyCode || 'MYR'),
-          type: String(candidate.type || 'TRD'),
-          phone: String(candidate.phone || ''),
-          area: String(candidate.area || ''),
-          agent: String(candidate.agent || payload.purchaseAgent || ''),
-          active: true,
-        },
-      };
-    }
-
     // Items
     const missingItems: NonNullable<NonNullable<PurchaseInvoiceSubmitRequest['createMissing']>['items']> = [];
     payload.details.forEach((d, i) => {
-      if (createItemsEnabled[i] && !d.itemCode) {
+      if (createItemsEnabled[i] && matches.items?.[i]?.proposedNewItem) {
         const proposed = (matches.items?.[i]?.proposedNewItem || {}) as PreviewProposedNewItem;
         missingItems.push({
           line: i + 1, // 1-based
           enabled: true,
           payload: {
-            itemCode: String(proposed.itemCodeSuggestion || ''),
-            description: String(proposed.description || d.description || ''),
-            itemGroup: String(proposed.itemGroup || d.itemGroup || ''),
+            itemCode: String(d.itemCode || proposed.itemCodeSuggestion || ''),
+            description: String(d.description || proposed.description || ''),
+            itemGroup: String(d.itemGroup || proposed.itemGroup || ''),
             itemType: String(proposed.itemType || ''),
             salesUom: String(proposed.salesUom || proposed.baseUom || d.uom || 'UNIT'),
             purchaseUom: String(proposed.purchaseUom || proposed.baseUom || d.uom || 'UNIT'),
             reportUom: String(proposed.reportUom || proposed.baseUom || d.uom || 'UNIT'),
+            uomConfirmed: true,
             stockControl: proposed.stockControl ?? false,
             hasSerialNo: proposed.hasSerialNo ?? false,
             hasBatchNo: proposed.hasBatchNo ?? false,
@@ -639,15 +698,27 @@ export default function PurchaseInvoiceTaskPage() {
           <div className="flex items-center gap-3">
             <Link href="/purchase-invoice" className="rounded-xl px-4 py-2 text-sm font-medium text-zinc-600 transition hover:bg-zinc-100 hover:text-zinc-900">Back</Link>
             {downloadOriginalHref ? (
-              <a
-                href={downloadOriginalHref}
-                target="_blank"
-                rel="noopener noreferrer"
-                className="inline-flex items-center gap-2 rounded-xl border border-zinc-200 bg-white px-4 py-2 text-sm font-medium text-zinc-900 transition hover:bg-zinc-50"
-              >
-                <Download className="h-4 w-4" />
-                Download Original
-              </a>
+              <div className="flex items-center gap-2">
+                <a
+                  href={downloadOriginalHref}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  className="inline-flex items-center gap-2 rounded-xl border border-zinc-200 bg-white px-4 py-2 text-sm font-medium text-zinc-900 transition hover:bg-zinc-50"
+                >
+                  <Download className="h-4 w-4" />
+                  Download Original
+                </a>
+                <button
+                  type="button"
+                  onClick={handleReanalyze}
+                  disabled={reanalyzeRunning || submitting}
+                  className="inline-flex items-center gap-2 rounded-xl border border-zinc-200 bg-white px-4 py-2 text-sm font-medium text-zinc-900 transition hover:bg-zinc-50 disabled:opacity-50"
+                  title="Re-run OCR and AI extraction for this invoice"
+                >
+                  {reanalyzeRunning ? <Loader2 className="h-4 w-4 animate-spin" /> : <RefreshCcw className="h-4 w-4" />}
+                  Reanalyze
+                </button>
+              </div>
             ) : null}
           </div>
         </div>
@@ -749,15 +820,27 @@ export default function PurchaseInvoiceTaskPage() {
             Back
           </Link>
           {downloadOriginalHref && (
-            <a
-              href={downloadOriginalHref}
-              target="_blank"
-              rel="noopener noreferrer"
-              className="inline-flex items-center gap-2 rounded-xl border border-zinc-200 bg-white px-4 py-2 text-sm font-medium text-zinc-900 transition hover:bg-zinc-50"
-            >
-              <Download className="h-4 w-4" />
-              Download Original
-            </a>
+            <div className="flex items-center gap-2">
+              <a
+                href={downloadOriginalHref}
+                target="_blank"
+                rel="noopener noreferrer"
+                className="inline-flex items-center gap-2 rounded-xl border border-zinc-200 bg-white px-4 py-2 text-sm font-medium text-zinc-900 transition hover:bg-zinc-50"
+              >
+                <Download className="h-4 w-4" />
+                Download Original
+              </a>
+              <button
+                type="button"
+                onClick={handleReanalyze}
+                disabled={reanalyzeRunning || submitting}
+                className="inline-flex items-center gap-2 rounded-xl border border-zinc-200 bg-white px-4 py-2 text-sm font-medium text-zinc-900 transition hover:bg-zinc-50 disabled:opacity-50"
+                title="Re-run OCR and AI extraction for this invoice"
+              >
+                {reanalyzeRunning ? <Loader2 className="h-4 w-4 animate-spin" /> : <RefreshCcw className="h-4 w-4" />}
+                Reanalyze
+              </button>
+            </div>
           )}
           <button
             type="button"
@@ -788,34 +871,6 @@ export default function PurchaseInvoiceTaskPage() {
                     <FieldWarning code="creditor_not_matched" customMsg="No matching creditor found" />
                     <FieldWarning code="creditor_needs_review" customMsg="Please review creditor match" />
                   </label>
-                  {/* Auto-create creditor toggle */}
-                  {!payload.creditorCode && matches.creditor && (
-                    <button
-                      type="button"
-                      onClick={() => setCreateCreditorEnabled((v) => !v)}
-                      className={cn(
-                        'mb-2 inline-flex items-center gap-2 rounded-lg border px-3 py-1.5 text-xs font-medium transition-all',
-                        createCreditorEnabled
-                          ? 'border-emerald-300 bg-emerald-50 text-emerald-700'
-                          : 'border-zinc-200 bg-zinc-50 text-zinc-500 hover:border-zinc-300'
-                      )}
-                    >
-                      <span
-                        className={cn(
-                          'relative inline-flex h-4 w-7 shrink-0 items-center rounded-full transition-colors',
-                          createCreditorEnabled ? 'bg-emerald-500' : 'bg-zinc-300'
-                        )}
-                      >
-                        <span
-                          className={cn(
-                            'inline-block h-3 w-3 rounded-full bg-white shadow-sm transition-transform',
-                            createCreditorEnabled ? 'translate-x-3.5' : 'translate-x-0.5'
-                          )}
-                        />
-                      </span>
-                      {createCreditorEnabled ? 'Auto-create creditor enabled' : 'Auto-create creditor'}
-                    </button>
-                  )}
                   <Popover open={isCreditorOpen} onOpenChange={setIsCreditorOpen}>
                     <PopoverTrigger asChild>
                       <button
@@ -1106,14 +1161,20 @@ export default function PurchaseInvoiceTaskPage() {
                   {payload.details.map((item, index) => (
                     <div key={index} className="flex flex-col gap-1">
                       <div className="flex flex-wrap gap-2 mb-1 items-center">
-                        <FieldWarning code="item_not_matched" line={index} customMsg="Item not matched" />
-                        <FieldWarning code="item_needs_review" line={index} customMsg="Please review item match" />
-                        <FieldWarning code="tax_code_not_confirmed" line={index} customMsg="Review Tax Code" />
+                        <FieldWarning code="item_not_matched" line={index + 1} customMsg="Item not matched" />
+                        <FieldWarning code="item_needs_review" line={index + 1} customMsg="Please review item match" />
+                        <FieldWarning code="tax_code_not_confirmed" line={index + 1} customMsg="Review Tax Code" />
                         {/* Auto-create item toggle */}
-                        {!item.itemCode && matches.items?.[index]?.proposedNewItem && (
+                        {matches.items?.[index]?.proposedNewItem && (
                           <button
                             type="button"
-                            onClick={() => setCreateItemsEnabled((prev) => ({ ...prev, [index]: !prev[index] }))}
+                            onClick={() =>
+                              setCreateItemsEnabled((prev) => {
+                                const nextEnabled = !prev[index];
+                                applyProposedNewItemToLine(index, nextEnabled);
+                                return { ...prev, [index]: nextEnabled };
+                              })
+                            }
                             className={cn(
                               'inline-flex items-center gap-1.5 rounded-md border px-2 py-1 text-[10px] font-medium transition-all',
                               createItemsEnabled[index]
@@ -1134,98 +1195,109 @@ export default function PurchaseInvoiceTaskPage() {
                                 )}
                               />
                             </span>
-                            {createItemsEnabled[index]
-                              ? `Create: ${String((matches.items?.[index]?.proposedNewItem as any)?.itemCodeSuggestion || 'New Item')}`
-                              : 'Auto-create item'}
+                            AutoCreate
                           </button>
                         )}
                       </div>
                       <div className="grid grid-cols-[1.5fr_1fr_60px_60px_1fr_1fr_60px] gap-3 items-center">
-                        <Popover 
-                          open={activeStockIdx === index} 
-                          onOpenChange={(open) => setActiveStockIdx(open ? index : null)}
-                        >
-                          <PopoverTrigger asChild>
-                            <button
-                              type="button"
-                              className={cn(
-                                "w-full border rounded-lg px-2 py-2 text-sm text-left transition-colors outline-none truncate h-[38px] bg-white",
-                                getBorderClass('item_', index)
-                              )}
-                            >
-                              {item.itemCode || <span className="text-gray-400 italic">Item Code</span>}
-                            </button>
-                          </PopoverTrigger>
-                          <PopoverContent className="w-[350px] p-0 bg-white shadow-xl border border-gray-100" align="start">
-                            <Command shouldFilter={false}>
-                              <CommandInput 
-                                placeholder="Search stock item..." 
-                                value={stockSearch}
-                                onValueChange={setStockSearch}
-                              />
-                              <CommandList
-                                className="max-h-72 overflow-auto"
-                                onScroll={(event) => {
-                                  const target = event.currentTarget;
-                                  if (target.scrollTop + target.clientHeight >= target.scrollHeight - 32) {
-                                    void loadMoreStocks();
-                                  }
-                                }}
+                        {createItemsEnabled[index] && matches.items?.[index]?.proposedNewItem ? (
+                          <input
+                            type="text"
+                            value={item.itemCode || ''}
+                            onChange={(e) => handleItemChange(index, 'itemCode', e.target.value)}
+                            placeholder="New Item Code"
+                            className={cn(
+                              "w-full border rounded-lg px-2 py-2 text-sm transition-all duration-200 outline-none h-[38px] bg-white",
+                              getBorderClass('item_', index + 1)
+                            )}
+                          />
+                        ) : (
+                          <Popover 
+                            open={activeStockIdx === index} 
+                            onOpenChange={(open) => setActiveStockIdx(open ? index : null)}
+                          >
+                            <PopoverTrigger asChild>
+                              <button
+                                type="button"
+                                className={cn(
+                                  "w-full border rounded-lg px-2 py-2 text-sm text-left transition-colors outline-none truncate h-[38px] bg-white",
+                                  getBorderClass('item_', index + 1)
+                                )}
                               >
-                                {isStockLoading && <div className="p-4 text-xs text-center text-gray-500">Loading...</div>}
-                                <CommandEmpty>No stock found.</CommandEmpty>
-                                <CommandGroup>
-                                  {stockOptions.map((opt) => (
-                                    <CommandItem
-                                      key={opt.itemCode}
-                                      value={opt.itemCode}
-                                      onSelect={() => {
-                                        handleItemChange(index, 'itemCode', opt.itemCode);
-                                        handleItemChange(index, 'description', opt.description);
-                                        handleItemChange(index, 'itemGroup', opt.group);
-                                        setActiveStockIdx(null);
-                                        setStockSearch("");
-                                      }}
-                                    >
-                                      <div className="flex flex-col">
-                                        <span className="font-semibold">{opt.itemCode}</span>
-                                        <span className="text-xs text-gray-500 line-clamp-1">{opt.description}</span>
-                                      </div>
-                                    </CommandItem>
-                                  ))}
-                                </CommandGroup>
-                                {isStockLoadingMore ? (
-                                  <div className="p-3 text-xs text-center text-gray-500">Loading more...</div>
-                                ) : null}
-                              </CommandList>
-                            </Command>
-                          </PopoverContent>
-                        </Popover>
+                                {item.itemCode || <span className="text-gray-400 italic">Item Code</span>}
+                              </button>
+                            </PopoverTrigger>
+                            <PopoverContent className="w-[350px] p-0 bg-white shadow-xl border border-gray-100" align="start">
+                              <Command shouldFilter={false}>
+                                <CommandInput 
+                                  placeholder="Search stock item..." 
+                                  value={stockSearch}
+                                  onValueChange={setStockSearch}
+                                />
+                                <CommandList
+                                  className="max-h-72 overflow-auto"
+                                  onScroll={(event) => {
+                                    const target = event.currentTarget;
+                                    if (target.scrollTop + target.clientHeight >= target.scrollHeight - 32) {
+                                      void loadMoreStocks();
+                                    }
+                                  }}
+                                >
+                                  {isStockLoading && <div className="p-4 text-xs text-center text-gray-500">Loading...</div>}
+                                  <CommandEmpty>No stock found.</CommandEmpty>
+                                  <CommandGroup>
+                                    {stockOptions.map((opt) => (
+                                      <CommandItem
+                                        key={opt.itemCode}
+                                        value={opt.itemCode}
+                                        onSelect={() => {
+                                          handleItemChange(index, 'itemCode', opt.itemCode);
+                                          handleItemChange(index, 'description', opt.description);
+                                          handleItemChange(index, 'itemGroup', opt.group);
+                                          setActiveStockIdx(null);
+                                          setStockSearch("");
+                                        }}
+                                      >
+                                        <div className="flex flex-col">
+                                          <span className="font-semibold">{opt.itemCode}</span>
+                                          <span className="text-xs text-gray-500 line-clamp-1">{opt.description}</span>
+                                        </div>
+                                      </CommandItem>
+                                    ))}
+                                  </CommandGroup>
+                                  {isStockLoadingMore ? (
+                                    <div className="p-3 text-xs text-center text-gray-500">Loading more...</div>
+                                  ) : null}
+                                </CommandList>
+                              </Command>
+                            </PopoverContent>
+                          </Popover>
+                        )}
                       <input
                         type="text"
                         value={item.accNo || ''}
                         onChange={(e) => handleItemChange(index, 'accNo', e.target.value)}
                         placeholder="Acc No"
-                        className={cn("w-full border rounded-lg px-2 py-2 text-sm transition-all duration-200 outline-none", getBorderClass('acc_no', index))}
+                        className={cn("w-full border rounded-lg px-2 py-2 text-sm transition-all duration-200 outline-none", getBorderClass('acc_no', index + 1))}
                       />
                       <input
                         type="text"
                         value={item.qty}
                         onChange={(e) => handleItemChange(index, 'qty', parseNumber(e.target.value))}
-                        className={cn("w-full border rounded-lg px-2 py-2 text-sm text-center transition-all duration-200 outline-none", getBorderClass('qty', index))}
+                        className={cn("w-full border rounded-lg px-2 py-2 text-sm text-center transition-all duration-200 outline-none", getBorderClass('qty', index + 1))}
                       />
                       <input
                         type="text"
                         value={item.uom || ''}
                         onChange={(e) => handleItemChange(index, 'uom', e.target.value)}
                         placeholder="UOM"
-                        className={cn("w-full border rounded-lg px-2 py-2 text-sm text-center transition-all duration-200 outline-none", getBorderClass('uom', index))}
+                        className={cn("w-full border rounded-lg px-2 py-2 text-sm text-center transition-all duration-200 outline-none", getBorderClass('uom', index + 1))}
                       />
                       <input
                         type="text"
                         value={item.unitPrice}
                         onChange={(e) => handleItemChange(index, 'unitPrice', parseNumber(e.target.value))}
-                        className={cn("w-full border rounded-lg px-2 py-2 text-sm text-right transition-all duration-200 outline-none", getBorderClass('unit_price', index))}
+                        className={cn("w-full border rounded-lg px-2 py-2 text-sm text-right transition-all duration-200 outline-none", getBorderClass('unit_price', index + 1))}
                       />
                       <div className="relative flex items-center">
                         <span className="absolute left-2 text-xs text-gray-500 pointer-events-none">{payload.currencyCode}</span>
@@ -1233,7 +1305,7 @@ export default function PurchaseInvoiceTaskPage() {
                           type="text"
                           value={item.amount}
                           onChange={(e) => handleItemChange(index, 'amount', parseNumber(e.target.value))}
-                          className={cn("w-full border rounded-lg pl-10 pr-2 py-2 text-sm text-right transition-all duration-200 outline-none", getBorderClass('amount', index))}
+                          className={cn("w-full border rounded-lg pl-10 pr-2 py-2 text-sm text-right transition-all duration-200 outline-none", getBorderClass('amount', index + 1))}
                         />
                       </div>
                       <div className="flex items-center justify-center gap-1">

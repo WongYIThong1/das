@@ -13,7 +13,7 @@ import { ApiRequestError } from '../lib/auth-api';
 import { safeExternalHref } from '@/lib/safe-url';
 import type { PreviewMatch, PreviewMatchStatus, PreviewProposedNewItem, PreviewWarningCode, PurchaseInvoicePreviewDetail, PurchaseInvoicePreviewPayload, PurchaseInvoicePreviewResponse } from '../lib/purchase-invoice-create-api';
 import { getPurchaseInvoiceAgentOptions, getPurchaseInvoiceCreditorOptions, getPurchaseInvoiceStockOptions, type PurchaseInvoiceAgentOption, type PurchaseInvoiceCreditorOption, type PurchaseInvoiceStockOption } from '../lib/purchase-invoice-picker-api';
-import { submitPurchaseInvoice, waitForPurchaseInvoiceSubmit, type PurchaseInvoiceCreateMissingCreditorPayload, type PurchaseInvoiceCreateMissingItemPayload, type PurchaseInvoiceSubmitEnvelope, type PurchaseInvoiceSubmitPayload, type PurchaseInvoiceSubmitRequest } from '../lib/purchase-invoice-submit-api';
+import { submitPurchaseInvoice, waitForPurchaseInvoiceSubmit, type PurchaseInvoiceCreateMissingItemPayload, type PurchaseInvoiceSubmitEnvelope, type PurchaseInvoiceSubmitPayload, type PurchaseInvoiceSubmitRequest } from '../lib/purchase-invoice-submit-api';
 
 interface CreateInvoiceProps {
   preview: PurchaseInvoicePreviewResponse;
@@ -193,25 +193,6 @@ function buildFinalPayload(draft: DraftPayload): PurchaseInvoiceSubmitPayload {
   };
 }
 
-function buildCreditorCreatePayload(preview: PurchaseInvoicePreviewResponse, draft: DraftPayload): PurchaseInvoiceCreateMissingCreditorPayload | null {
-  const candidate = (preview.matches?.creditor?.candidate ?? {}) as Record<string, unknown>;
-  const companyName = normalizeString(candidate.companyName) || normalizeString(preview.extracted?.creditorName) || formatCandidate(preview.matches?.creditor);
-  if (!companyName || companyName === 'No suggestion returned.') {
-    return null;
-  }
-
-  const code = normalizeString(candidate.code) || makeCodeFromText(companyName, 'CR');
-  return {
-    code,
-    companyName,
-    currency: normalizeString(candidate.currency) || draft.currencyCode.trim() || 'MYR',
-    type: normalizeString(candidate.type) || 'TRD',
-    phone: normalizeString(candidate.phone),
-    area: normalizeString(candidate.area),
-    agent: normalizeString(candidate.agent) || draft.purchaseAgent.trim(),
-    active: normalizeBoolean(candidate.active, true),
-  };
-}
 
 function buildItemCreatePayload(detail: DraftDetail, match: PreviewMatch | undefined, line: number): PurchaseInvoiceCreateMissingItemPayload {
   const proposed = (match?.proposedNewItem ?? {}) as PreviewProposedNewItem;
@@ -236,6 +217,7 @@ function buildItemCreatePayload(detail: DraftDetail, match: PreviewMatch | undef
     isActive: normalizeBoolean(proposed.active ?? candidate.isActive, true),
     taxCode: normalizeString(proposed.taxCode) || normalizeString(candidate.taxCode),
     purchaseTaxCode: normalizeString(proposed.purchaseTaxCode) || normalizeString(candidate.purchaseTaxCode) || detail.taxCode.trim(),
+    uomConfirmed: true,
   };
 }
 
@@ -243,15 +225,7 @@ function buildSubmitRequest(preview: PurchaseInvoicePreviewResponse, draft: Draf
   const payload = buildFinalPayload(draft);
   const createMissing: NonNullable<PurchaseInvoiceSubmitRequest['createMissing']> = {};
 
-  if (!payload.creditorCode) {
-    const creditorPayload = buildCreditorCreatePayload(preview, draft);
-    if (creditorPayload) {
-      createMissing.creditor = {
-        enabled: true,
-        payload: creditorPayload,
-      };
-    }
-  }
+
 
   const itemCreates = payload.details
     .map((detail, index) => {
@@ -583,7 +557,7 @@ export function CreateInvoice({ preview, onBack, onSubmitted }: CreateInvoicePro
   );
   const submitPlan = useMemo(() => buildSubmitRequest(preview, draft, submitRequestId ?? 'preview-plan'), [draft, preview, submitRequestId]);
   const missingItemCount = submitPlan.createMissing?.items?.length ?? 0;
-  const willCreateCreditor = Boolean(submitPlan.createMissing?.creditor?.enabled);
+  const willCreateCreditor = false;
   const localBlockingCount = missingAccountLines.length + missingCreateSupportLines.length;
   const canSubmit = canContinue && localBlockingCount === 0;
   const readinessScore = useMemo(() => {
@@ -708,8 +682,8 @@ export function CreateInvoice({ preview, onBack, onSubmitted }: CreateInvoicePro
       toast.error('At least one invoice line is required before submit.');
       return;
     }
-    if (!request.payload.creditorCode && !request.createMissing?.creditor?.payload.companyName) {
-      toast.error('Creditor code is empty and no creditor create payload can be generated.');
+    if (!request.payload.creditorCode) {
+      toast.error('Creditor code is empty.');
       return;
     }
 

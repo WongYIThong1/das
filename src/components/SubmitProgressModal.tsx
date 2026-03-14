@@ -1,6 +1,7 @@
 'use client';
 
 import React, { useMemo, useState, useEffect } from 'react';
+import { createPortal } from 'react-dom';
 import { useSubmit, getStepInfo, type SubmitPhase } from './SubmitProvider';
 import { useRouter } from 'next/navigation';
 import { motion, AnimatePresence } from 'motion/react';
@@ -41,6 +42,11 @@ export default function SubmitProgressModal() {
 
   // local state to toggle between Centered Dialog and Bottom-right Card
   const [isDocked, setIsDocked] = useState(false);
+  const [mounted, setMounted] = useState(false);
+
+  useEffect(() => {
+    setMounted(true);
+  }, []);
 
   // Reset isDocked when a NEW submission starts
   useEffect(() => {
@@ -85,12 +91,13 @@ export default function SubmitProgressModal() {
 
   // --- MODE 1: Docked (Bottom-right Card) ---
   if (isDocked) {
-    return (
+    const node = (
       <AnimatePresence>
         <motion.div
           initial={{ opacity: 0, y: 20, scale: 0.9 }}
           animate={{ opacity: 1, y: 0, scale: 1 }}
           exit={{ opacity: 0, y: 20, scale: 0.9 }}
+          style={{ right: 24, bottom: 24 }}
           className="fixed bottom-6 right-6 z-[100] w-[360px] overflow-hidden rounded-2xl border border-zinc-200 bg-white shadow-2xl"
         >
           <div className="flex items-center justify-between border-b border-zinc-100 bg-zinc-50/80 px-4 py-2.5">
@@ -152,9 +159,25 @@ export default function SubmitProgressModal() {
                </button>
             )}
           </div>
+
+          {/* Bottom progress bar (visible even when docked) */}
+          <div className="absolute bottom-0 left-0 right-0 h-1 bg-zinc-100">
+            <motion.div
+              initial={{ width: 0 }}
+              animate={{ width: `${Math.max(0, Math.min(100, progressPercent))}%` }}
+              transition={{ duration: 0.8, ease: 'easeOut' }}
+              className={cn(
+                'h-full',
+                isFailed ? 'bg-red-500' : isSucceeded ? 'bg-emerald-500' : 'bg-zinc-900'
+              )}
+            />
+          </div>
         </motion.div>
       </AnimatePresence>
     );
+
+    // Render docked mode into <body> so it can't be affected by transformed layout ancestors.
+    return mounted ? createPortal(node, document.body) : null;
   }
 
   // --- MODE 2: Centered (Original Modal) ---
@@ -281,6 +304,19 @@ export default function SubmitProgressModal() {
             )}
           </DialogFooter>
         )}
+
+        {/* Bottom progress bar (visible even when centered) */}
+        <div className="absolute bottom-0 left-0 right-0 h-1 bg-zinc-100">
+          <motion.div
+            initial={{ width: 0 }}
+            animate={{ width: `${Math.max(0, Math.min(100, progressPercent))}%` }}
+            transition={{ duration: 0.8, ease: 'easeOut' }}
+            className={cn(
+              'h-full',
+              isFailed ? 'bg-red-500' : isSucceeded ? 'bg-emerald-500' : 'bg-zinc-900'
+            )}
+          />
+        </div>
       </DialogContent>
     </Dialog>
   );

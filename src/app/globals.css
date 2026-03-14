@@ -58,6 +58,15 @@
   [data-sonner-toast][data-type='warning'] svg {
     color: #f59e0b;
   }
+
+  /* Hard-center the preview progress dialog without overriding transform-based animations. */
+  [data-preview-progress-dialog] {
+    position: fixed !important;
+    top: 50% !important;
+    left: 50% !important;
+    translate: -50% -50% !important;
+  }
+
 }
 
 :root {
