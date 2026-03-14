@@ -10,6 +10,7 @@ import { Popover, PopoverContent, PopoverTrigger } from '@/components/ui/popover
 import DeleteConfirmModal from './DeleteConfirmModal';
 import { Input } from './ui/input';
 import { ApiRequestError } from '../lib/auth-api';
+import { safeExternalHref } from '@/lib/safe-url';
 import type { PreviewMatch, PreviewMatchStatus, PreviewProposedNewItem, PreviewWarningCode, PurchaseInvoicePreviewDetail, PurchaseInvoicePreviewPayload, PurchaseInvoicePreviewResponse } from '../lib/purchase-invoice-create-api';
 import { getPurchaseInvoiceAgentOptions, getPurchaseInvoiceCreditorOptions, getPurchaseInvoiceStockOptions, type PurchaseInvoiceAgentOption, type PurchaseInvoiceCreditorOption, type PurchaseInvoiceStockOption } from '../lib/purchase-invoice-picker-api';
 import { submitPurchaseInvoice, waitForPurchaseInvoiceSubmit, type PurchaseInvoiceCreateMissingCreditorPayload, type PurchaseInvoiceCreateMissingItemPayload, type PurchaseInvoiceSubmitEnvelope, type PurchaseInvoiceSubmitPayload, type PurchaseInvoiceSubmitRequest } from '../lib/purchase-invoice-submit-api';
@@ -547,6 +548,7 @@ export function CreateInvoice({ preview, onBack, onSubmitted }: CreateInvoicePro
   const blockingWarnings = warnings.filter((warning) => BLOCKING_WARNINGS.has(warning));
   const canContinue = blockingWarnings.length === 0;
   const itemMatches = preview.matches?.items ?? [];
+  const originalHref = useMemo(() => safeExternalHref(preview.file?.downloadUrl || preview.payload.externalLink), [preview.file?.downloadUrl, preview.payload.externalLink]);
   const selectedDocDate = useMemo(() => parseDraftDate(draft.docDate), [draft.docDate]);
   const subtotal = useMemo(() => draft.details.reduce((sum, detail) => {
     const amount = Number(detail.amount);
@@ -807,11 +809,11 @@ export function CreateInvoice({ preview, onBack, onSubmitted }: CreateInvoicePro
             <h1 className="text-xl font-semibold tracking-tight text-zinc-950">Purchase invoice review draft</h1>
             <div className="flex flex-wrap items-center gap-3 text-xs text-zinc-500">
               <span className="inline-flex items-center gap-1.5"><FileText size={12} />{preview.sourceFileName || 'Uploaded invoice'}</span>
-{preview.file?.downloadUrl || preview.payload.externalLink ? (
+{originalHref ? (
   <a
-    href={preview.file?.downloadUrl || preview.payload.externalLink}
+    href={originalHref}
     target="_blank"
-    rel="noreferrer"
+    rel="noopener noreferrer"
     className="inline-flex items-center gap-1.5 text-zinc-500 transition hover:text-zinc-900"
   >
     <Download size={12} />

@@ -1,6 +1,6 @@
 'use client';
 
-import { createContext, useCallback, useContext, useMemo, useRef, useState } from 'react';
+import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState } from 'react';
 import {
   submitPurchaseInvoice,
   getPurchaseInvoiceSubmitTask,
@@ -29,33 +29,33 @@ export type SubmitStepInfo = {
 const STEP_MAP: Record<SubmitPhase, SubmitStepInfo> = {
   queued: {
     progress: 8,
-    label: 'Submitting',
-    description: 'Your invoice has been queued and will begin processing shortly.',
+    label: 'Transmission',
+    description: 'Securing your connection and queueing the invoice for processing.',
   },
   preparing: {
     progress: 25,
-    label: 'Preparing data',
-    description: 'Organising your invoice details and checking for missing records.',
+    label: 'Synthesis',
+    description: 'Finalizing invoice metadata and preparing missing master data records.',
   },
   validating: {
     progress: 50,
-    label: 'Verifying',
-    description: 'Running compliance checks and AI review on your submission.',
+    label: 'Compliance Audit',
+    description: 'Running AI audit and ledger validation rules to ensure data integrity.',
   },
   dispatching: {
     progress: 75,
-    label: 'Creating records',
-    description: 'Writing stock items, creditors, and the purchase invoice into the ledger.',
+    label: 'Ledger Integration',
+    description: 'Writing creditors, stock items, and the final invoice into your accounting system.',
   },
   succeeded: {
     progress: 100,
-    label: 'Complete',
-    description: 'Your purchase invoice was created successfully!',
+    label: 'Finalized',
+    description: 'Transaction complete. Your purchase invoice has been successfully ledgered.',
   },
   failed: {
-    progress: -1, // keep last known progress
-    label: 'Failed',
-    description: 'Something went wrong while processing your invoice.',
+    progress: -1,
+    label: 'Submission Failed',
+    description: 'An error occurred during the integration process. Please review and retry.',
   },
 };
 
@@ -96,6 +96,76 @@ const SubmitContext = createContext<SubmitContextValue | null>(null);
 
 const POLL_INTERVAL_MS = 1500;
 const POLL_TIMEOUT_MS = 180_000;
+const SUBMIT_STORAGE_KEY = 'pi:submit:task';
+const SUBMIT_REQUEST_STORAGE_KEY = 'pi:submit:request';
+
+type StoredSubmitTask = {
+  taskId: string;
+  startedAt: number;
+};
+
+type StoredSubmitRequest = {
+  request: PurchaseInvoiceSubmitRequest;
+  startedAt: number;
+};
+
+function readStoredSubmitTask(): StoredSubmitTask | null {
+  if (typeof window === 'undefined') return null;
+  try {
+    const raw = window.sessionStorage.getItem(SUBMIT_STORAGE_KEY);
+    if (!raw) return null;
+    const parsed = JSON.parse(raw) as Partial<StoredSubmitTask>;
+    if (typeof parsed.taskId !== 'string' || !parsed.taskId) return null;
+    if (typeof parsed.startedAt !== 'number' || !Number.isFinite(parsed.startedAt)) return null;
+    return { taskId: parsed.taskId, startedAt: parsed.startedAt };
+  } catch {
+    return null;
+  }
+}
+
+function writeStoredSubmitTask(task: StoredSubmitTask | null) {
+  if (typeof window === 'undefined') return;
+  try {
+    if (!task) {
+      window.sessionStorage.removeItem(SUBMIT_STORAGE_KEY);
+      return;
+    }
+    window.sessionStorage.setItem(SUBMIT_STORAGE_KEY, JSON.stringify(task));
+  } catch {
+    // ignore
+  }
+}
+
+function readStoredSubmitRequest(): StoredSubmitRequest | null {
+  if (typeof window === 'undefined') return null;
+  try {
+    const raw = window.sessionStorage.getItem(SUBMIT_REQUEST_STORAGE_KEY);
+    if (!raw) return null;
+    const parsed = JSON.parse(raw) as Partial<StoredSubmitRequest>;
+    if (!parsed || typeof parsed !== 'object') return null;
+    if (typeof parsed.startedAt !== 'number' || !Number.isFinite(parsed.startedAt)) return null;
+    const req = parsed.request as PurchaseInvoiceSubmitRequest | undefined;
+    if (!req || typeof req !== 'object') return null;
+    if (typeof (req as any).requestId !== 'string' || !(req as any).requestId) return null;
+    if (typeof (req as any).previewTaskId !== 'string' || !(req as any).previewTaskId) return null;
+    return { request: req, startedAt: parsed.startedAt };
+  } catch {
+    return null;
+  }
+}
+
+function writeStoredSubmitRequest(value: StoredSubmitRequest | null) {
+  if (typeof window === 'undefined') return;
+  try {
+    if (!value) {
+      window.sessionStorage.removeItem(SUBMIT_REQUEST_STORAGE_KEY);
+      return;
+    }
+    window.sessionStorage.setItem(SUBMIT_REQUEST_STORAGE_KEY, JSON.stringify(value));
+  } catch {
+    // ignore
+  }
+}
 
 export function SubmitProvider({ children }: { children: React.ReactNode }) {
   const [isOpen, setIsOpen] = useState(false);
@@ -110,6 +180,8 @@ export function SubmitProvider({ children }: { children: React.ReactNode }) {
 
   const dismiss = useCallback(() => {
     if (runningRef.current) return; // can't dismiss while running
+    writeStoredSubmitTask(null);
+    writeStoredSubmitRequest(null);
     setIsOpen(false);
     // Reset state for next submit
     setStatus(null);
@@ -118,31 +190,15 @@ export function SubmitProvider({ children }: { children: React.ReactNode }) {
     setErrorMessage(null);
   }, []);
 
-  const startSubmit = useCallback(async (request: PurchaseInvoiceSubmitRequest) => {
+  const pollSubmitTask = useCallback(async (submitTaskId: string, startedAt: number) => {
     if (runningRef.current) return;
     runningRef.current = true;
     setIsRunning(true);
     setIsOpen(true);
-    setStatus('queued');
-    setTask(null);
-    setResult(null);
+    setStatus((current) => current ?? 'queued');
     setErrorMessage(null);
 
     try {
-      // Step 1: POST /purchase-invoice/submit
-      const createRes = await submitPurchaseInvoice(request);
-      const submitTaskId = (createRes as any).taskId as string | undefined;
-
-      if (!submitTaskId) {
-        // Synchronous result (no task)
-        setStatus('succeeded');
-        setResult(createRes as any);
-        return;
-      }
-
-      // Step 2: Poll GET /purchase-invoice/submit/{taskId}
-      const startedAt = Date.now();
-
       while (true) {
         const taskRes = await getPurchaseInvoiceSubmitTask(submitTaskId);
         setTask(taskRes);
@@ -156,7 +212,6 @@ export function SubmitProvider({ children }: { children: React.ReactNode }) {
         if (taskRes.status === 'failed') {
           const msg = taskRes.error || taskRes.message || 'Purchase invoice creation failed.';
           setErrorMessage(msg);
-          // Even on failure, set partial results so the UI can display them
           if (taskRes.result) {
             setResult(taskRes.result);
           }
@@ -177,11 +232,110 @@ export function SubmitProvider({ children }: { children: React.ReactNode }) {
           : err instanceof Error
             ? err.message
             : 'An unexpected error occurred.';
+      setErrorMessage(message);
+    } finally {
+      runningRef.current = false;
+      setIsRunning(false);
+    }
+  }, []);
+
+  useEffect(() => {
+    const stored = readStoredSubmitTask();
+    if (stored) {
+      void pollSubmitTask(stored.taskId, stored.startedAt);
+      return;
+    }
+
+    const pending = readStoredSubmitRequest();
+    if (!pending) return;
+
+    // If we refreshed before receiving a taskId, retry the submit once using the same requestId.
+    // This relies on backend-side idempotency keyed by requestId.
+    void (async () => {
+      if (Date.now() - pending.startedAt > POLL_TIMEOUT_MS) {
+        writeStoredSubmitRequest(null);
+        return;
+      }
+
+      setIsOpen(true);
+      setIsRunning(true);
+      setStatus((current) => current ?? 'queued');
+      setErrorMessage(null);
+
+      try {
+        const createRes = await submitPurchaseInvoice(pending.request);
+        const submitTaskId = (createRes as any).taskId as string | undefined;
+
+        if (!submitTaskId) {
+          setStatus('succeeded');
+          setResult(createRes as any);
+          writeStoredSubmitRequest(null);
+          return;
+        }
+
+        writeStoredSubmitTask({ taskId: submitTaskId, startedAt: pending.startedAt });
+        writeStoredSubmitRequest(null);
+        await pollSubmitTask(submitTaskId, pending.startedAt);
+      } catch (err: unknown) {
+        const message =
+          err instanceof ApiRequestError
+            ? err.message
+            : err instanceof Error
+              ? err.message
+              : 'An unexpected error occurred.';
+        setStatus('failed');
+        setErrorMessage(message);
+      } finally {
+        setIsRunning(false);
+      }
+    })();
+  }, [pollSubmitTask]);
+
+  const startSubmit = useCallback(async (request: PurchaseInvoiceSubmitRequest) => {
+    if (runningRef.current) return;
+    runningRef.current = true;
+    setIsRunning(true);
+    setIsOpen(true);
+    setStatus('queued');
+    setTask(null);
+    setResult(null);
+    setErrorMessage(null);
+
+    const startedAt = Date.now();
+    writeStoredSubmitRequest({ request, startedAt });
+
+    try {
+      // Step 1: POST /purchase-invoice/submit
+      const createRes = await submitPurchaseInvoice(request);
+      const submitTaskId = (createRes as any).taskId as string | undefined;
+
+      if (!submitTaskId) {
+        // Synchronous result (no task)
+        setStatus('succeeded');
+        setResult(createRes as any);
+        writeStoredSubmitRequest(null);
+        return;
+      }
+
+      // Persist task so a page refresh can resume polling / show final state.
+      writeStoredSubmitTask({ taskId: submitTaskId, startedAt });
+      writeStoredSubmitRequest(null);
+    } catch (err: unknown) {
+      const message =
+        err instanceof ApiRequestError
+          ? err.message
+          : err instanceof Error
+            ? err.message
+            : 'An unexpected error occurred.';
       setStatus('failed');
       setErrorMessage(message);
     } finally {
       runningRef.current = false;
       setIsRunning(false);
+    }
+    const stored = readStoredSubmitTask();
+    if (stored) {
+      void pollSubmitTask(stored.taskId, stored.startedAt);
     }
   }, []);
 

@@ -1,4 +1,5 @@
 import { ApiRequestError } from './auth-api';
+import { safeFetch } from './safe-fetch';
 
 export type PurchaseInvoiceSubmitDetail = {
   itemCode: string;
@@ -148,7 +149,7 @@ async function parseApiError(response: Response) {
 }
 
 export async function submitPurchaseInvoice(request: PurchaseInvoiceSubmitRequest) {
-  const response = await fetch('/purchase-invoice/submit', {
+  const response = await safeFetch('/purchase-invoice/submit', {
     method: 'POST',
     credentials: 'include',
     headers: {
@@ -182,7 +183,7 @@ export async function submitPurchaseInvoice(request: PurchaseInvoiceSubmitReques
 }
 
 export async function getPurchaseInvoiceSubmitTask(taskId: string) {
-  const response = await fetch(`/purchase-invoice/submit/${taskId}`, {
+  const response = await safeFetch(`/purchase-invoice/submit/${taskId}`, {
     method: 'GET',
     credentials: 'include',
   });

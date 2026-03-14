@@ -1,4 +1,5 @@
 import { ApiRequestError } from './auth-api';
+import { safeFetch } from './safe-fetch';
 
 export type PurchaseInvoiceListItem = {
   supplierInvoiceNo: string;
@@ -96,7 +97,7 @@ export async function getPurchaseInvoiceList({
     query.set('grandTotalMax', String(grandTotalMax));
   }
 
-  const response = await fetch(`/purchase-invoice/lists?${query.toString()}`, {
+  const response = await safeFetch(`/purchase-invoice/lists?${query.toString()}`, {
     method: 'GET',
     credentials: 'include',
   });

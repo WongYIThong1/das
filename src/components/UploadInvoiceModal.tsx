@@ -5,6 +5,7 @@ import { X, UploadCloud, FileText, Loader2, AlertCircle, Sparkles, CheckCircle2,
 import { motion, AnimatePresence } from 'motion/react';
 import { toast } from 'sonner';
 import { ApiRequestError } from '../lib/auth-api';
+import { safeExternalHref } from '@/lib/safe-url';
 import {
   cancelPurchaseInvoicePreviewTask,
   createPurchaseInvoicePreviewTask,
@@ -265,7 +266,7 @@ export function UploadInvoiceModal({ isOpen, onClose, onSuccess }: UploadInvoice
     }
   }, [error, taskStatus]);
 
-  const downloadOriginalHref = earlyDownloadUrl || earlyExternalLink;
+  const downloadOriginalHref = safeExternalHref(earlyDownloadUrl || earlyExternalLink);
 
   const applyFile = useCallback((nextFile: File | null) => {
     if (!nextFile) {

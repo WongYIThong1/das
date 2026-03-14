@@ -1,4 +1,5 @@
 import { ApiRequestError } from './auth-api';
+import { safeFetch } from './safe-fetch';
 
 export type StockListItem = {
   itemCode: string;
@@ -65,7 +66,7 @@ export async function getStockList({ page, pageSize, sortBy, sortOrder, search }
     query.set('search', search);
   }
 
-  const response = await fetch(`/stock/lists?${query.toString()}`, {
+  const response = await safeFetch(`/stock/lists?${query.toString()}`, {
     method: 'GET',
     credentials: 'include',
   });

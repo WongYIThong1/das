@@ -15,9 +15,11 @@ import { Command, CommandInput, CommandList, CommandEmpty, CommandGroup, Command
 import { Badge } from "@/components/ui/badge";
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip";
 import { cn } from "@/lib/utils";
+import { safeExternalHref } from '@/lib/safe-url';
 import { Search, AlertTriangle } from 'lucide-react';
 
-import { waitForPurchaseInvoicePreview, type PreviewTaskStatus, PurchaseInvoicePreviewPayload, PurchaseInvoicePreviewDetail, getCreditorOptions, getAgentOptions, getStockOptions } from '../../../../lib/purchase-invoice-create-api';
+import { waitForPurchaseInvoicePreview, type PreviewTaskStatus, PurchaseInvoicePreviewPayload, PurchaseInvoicePreviewDetail, getCreditorOptions, getAgentOptions, getStockOptions, type PurchaseInvoicePreviewMatches, type PreviewProposedNewItem } from '../../../../lib/purchase-invoice-create-api';
+import { getPurchaseInvoiceList } from '../../../../lib/purchase-invoice-api';
 import { type PurchaseInvoiceSubmitRequest } from '../../../../lib/purchase-invoice-submit-api';
 import { useSubmit } from '../../../../components/SubmitProvider';
 
@@ -28,12 +30,21 @@ export default function PurchaseInvoiceTaskPage() {
 
   const { startSubmit, isRunning: submitting } = useSubmit();
   const [loading, setLoading] = useState(true);
+  const [loadError, setLoadError] = useState<string | null>(null);
+  const [loadNonce, setLoadNonce] = useState(0);
   const [payload, setPayload] = useState<PurchaseInvoicePreviewPayload | null>(null);
   const [editingItemIndex, setEditingItemIndex] = useState<number | null>(null);
   const [warnings, setWarnings] = useState<unknown[]>([]);
   const [taskStatus, setTaskStatus] = useState<PreviewTaskStatus | null>(null);
   const [earlyDownloadUrl, setEarlyDownloadUrl] = useState<string | null>(null);
   const [earlyExternalLink, setEarlyExternalLink] = useState<string | null>(null);
+  const [matches, setMatches] = useState<PurchaseInvoicePreviewMatches>({});
+  const [existingInvoiceNo, setExistingInvoiceNo] = useState<string | null>(null);
+  const [existingInvoiceCheckError, setExistingInvoiceCheckError] = useState<string | null>(null);
+
+  // createMissing toggle states
+  const [createCreditorEnabled, setCreateCreditorEnabled] = useState(false);
+  const [createItemsEnabled, setCreateItemsEnabled] = useState<Record<number, boolean>>({});
 
   // Search/Picker states
   const [creditorOptions, setCreditorOptions] = useState<any[]>([]);
@@ -64,8 +75,11 @@ export default function PurchaseInvoiceTaskPage() {
 
   useEffect(() => {
     if (!taskId) return;
-    
+
     let isMounted = true;
+    setLoading(true);
+    setLoadError(null);
+    setPayload(null);
     waitForPurchaseInvoicePreview(taskId, 'invoice', {
       onProgress: (nextTask) => {
         if (!isMounted) {
@@ -83,8 +97,23 @@ export default function PurchaseInvoiceTaskPage() {
       .then((res: any) => {
         if (isMounted) {
           setPayload(res.payload);
-          // Safely set warnings, handling both strings or objects
           setWarnings(res.warnings || []);
+          const previewMatches: PurchaseInvoicePreviewMatches = res.matches || {};
+          setMatches(previewMatches);
+
+          // Auto-enable createMissing toggles based on empty codes
+          const p = res.payload as PurchaseInvoicePreviewPayload;
+          if (!p.creditorCode && previewMatches.creditor) {
+            setCreateCreditorEnabled(true);
+          }
+          const itemToggles: Record<number, boolean> = {};
+          p.details.forEach((d: PurchaseInvoicePreviewDetail, i: number) => {
+            if (!d.itemCode && previewMatches.items?.[i]?.proposedNewItem) {
+              itemToggles[i] = true;
+            }
+          });
+          setCreateItemsEnabled(itemToggles);
+
           setLoading(false);
         }
       })
@@ -95,12 +124,54 @@ export default function PurchaseInvoiceTaskPage() {
             router.push('/purchase-invoice');
             return;
           }
-          toast.error(err.message || 'Failed to load preview');
+          const message = err?.message || 'Failed to load preview';
+          setLoadError(message);
+          toast.error(message);
           setLoading(false);
         }
       });
     return () => { isMounted = false; };
-  }, [router, taskId]);
+  }, [router, taskId, loadNonce]);
+
+  const retryLoad = () => {
+    setLoadNonce((current) => current + 1);
+  };
+
+  useEffect(() => {
+    const supplierInvoiceNo = payload?.supplierInvoiceNo?.trim() ?? '';
+    if (!supplierInvoiceNo) {
+      setExistingInvoiceNo(null);
+      setExistingInvoiceCheckError(null);
+      return;
+    }
+
+    let cancelled = false;
+    setExistingInvoiceNo(null);
+    setExistingInvoiceCheckError(null);
+
+    void (async () => {
+      try {
+        const list = await getPurchaseInvoiceList({
+          page: 1,
+          pageSize: 20,
+          search: supplierInvoiceNo,
+        });
+        if (cancelled) return;
+        const hit = (list.items ?? []).find((item) => item.supplierInvoiceNo === supplierInvoiceNo) ?? null;
+        setExistingInvoiceNo(hit?.invoiceNo ?? null);
+      } catch (error) {
+        if (cancelled) return;
+        const message = error instanceof Error && error.message ? error.message : 'Unable to verify submit status.';
+        setExistingInvoiceCheckError(message);
+      }
+    })();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [payload?.supplierInvoiceNo]);
+
+  const alreadySubmitted = Boolean(existingInvoiceNo);
 
   // Preload picker options as soon as the user enters the page, so the first open
   // of the dropdown is instant (no need to type before seeing options).
@@ -442,6 +513,61 @@ export default function PurchaseInvoiceTaskPage() {
 
   const handleSubmit = async () => {
     if (!payload) return;
+    if (alreadySubmitted) {
+      toast.message('This invoice appears to have been submitted already. Returning to list.');
+      router.push('/purchase-invoice');
+      return;
+    }
+
+    // Build createMissing from toggle states
+    const createMissing: PurchaseInvoiceSubmitRequest['createMissing'] = {};
+
+    // Creditor
+    if (createCreditorEnabled && !payload.creditorCode && matches.creditor) {
+      const candidate = matches.creditor.candidate || ({} as Record<string, unknown>);
+      createMissing.creditor = {
+        enabled: true,
+        payload: {
+          code: String(candidate.code || candidate.accNo || ''),
+          companyName: String(candidate.companyName || candidate.name || ''),
+          currency: String(candidate.currency || payload.currencyCode || 'MYR'),
+          type: String(candidate.type || 'TRD'),
+          phone: String(candidate.phone || ''),
+          area: String(candidate.area || ''),
+          agent: String(candidate.agent || payload.purchaseAgent || ''),
+          active: true,
+        },
+      };
+    }
+
+    // Items
+    const missingItems: NonNullable<NonNullable<PurchaseInvoiceSubmitRequest['createMissing']>['items']> = [];
+    payload.details.forEach((d, i) => {
+      if (createItemsEnabled[i] && !d.itemCode) {
+        const proposed = (matches.items?.[i]?.proposedNewItem || {}) as PreviewProposedNewItem;
+        missingItems.push({
+          line: i + 1, // 1-based
+          enabled: true,
+          payload: {
+            itemCode: String(proposed.itemCodeSuggestion || ''),
+            description: String(proposed.description || d.description || ''),
+            itemGroup: String(proposed.itemGroup || d.itemGroup || ''),
+            itemType: String(proposed.itemType || ''),
+            salesUom: String(proposed.salesUom || proposed.baseUom || d.uom || 'UNIT'),
+            purchaseUom: String(proposed.purchaseUom || proposed.baseUom || d.uom || 'UNIT'),
+            reportUom: String(proposed.reportUom || proposed.baseUom || d.uom || 'UNIT'),
+            stockControl: proposed.stockControl ?? false,
+            hasSerialNo: proposed.hasSerialNo ?? false,
+            hasBatchNo: proposed.hasBatchNo ?? false,
+            isActive: proposed.active ?? true,
+            taxCode: String(proposed.taxCode || ''),
+            purchaseTaxCode: String(proposed.purchaseTaxCode || d.taxCode || ''),
+          },
+        });
+      }
+    });
+    createMissing.items = missingItems;
+
     const req: PurchaseInvoiceSubmitRequest = {
       requestId: `submit-${Date.now()}`,
       previewTaskId: taskId,
@@ -465,10 +591,10 @@ export default function PurchaseInvoiceTaskPage() {
           uom: d.uom,
           taxCode: d.taxCode || '',
           accNo: d.accNo,
-          itemGroup: d.itemGroup || ''
-        }))
+          itemGroup: d.itemGroup || '',
+        })),
       },
-      createMissing: { items: [] }
+      createMissing,
     };
     await startSubmit(req);
   };
@@ -481,7 +607,7 @@ export default function PurchaseInvoiceTaskPage() {
     return Number(str.replace(/,/g, '')) || 0;
   };
 
-  const downloadOriginalHref = earlyDownloadUrl || earlyExternalLink || payload?.externalLink || null;
+  const downloadOriginalHref = safeExternalHref(earlyDownloadUrl || earlyExternalLink || payload?.externalLink || null);
 
   const statusLabel =
     taskStatus === 'queued'
@@ -498,7 +624,7 @@ export default function PurchaseInvoiceTaskPage() {
                 ? 'Ready'
                 : null;
 
-  if (loading || !payload) {
+  if (loading) {
     return (
       <div className="flex h-screen flex-col bg-white">
         <div className="flex shrink-0 items-center justify-between gap-4 border-b border-zinc-200/80 bg-white/80 px-6 py-4 backdrop-blur-md sticky top-0 z-10">
@@ -535,6 +661,52 @@ export default function PurchaseInvoiceTaskPage() {
     );
   }
 
+  if (loadError || !payload) {
+    return (
+      <div className="flex h-screen flex-col bg-white">
+        <div className="flex shrink-0 items-center justify-between gap-4 border-b border-zinc-200/80 bg-white/80 px-6 py-4 backdrop-blur-md sticky top-0 z-10">
+          <div className="flex items-center gap-3">
+            <h1 className="text-xl font-semibold tracking-tight text-zinc-950">Purchase invoice review draft</h1>
+          </div>
+          <div className="flex items-center gap-3">
+            <Link
+              href="/purchase-invoice"
+              className="rounded-xl px-4 py-2 text-sm font-medium text-zinc-600 transition hover:bg-zinc-100 hover:text-zinc-900"
+            >
+              Back
+            </Link>
+          </div>
+        </div>
+        <div className="flex-1 flex items-center justify-center px-6">
+          <div className="w-full max-w-xl rounded-2xl border border-zinc-200 bg-white p-6 shadow-sm">
+            <div className="flex items-start gap-3">
+              <AlertTriangle className="mt-0.5 h-5 w-5 text-amber-500" />
+              <div className="space-y-2">
+                <h2 className="text-lg font-semibold text-zinc-900">Unable to load preview</h2>
+                <p className="text-sm text-zinc-600">{loadError ?? 'Preview payload is unavailable.'}</p>
+                <div className="flex flex-wrap gap-3 pt-2">
+                  <button
+                    type="button"
+                    onClick={retryLoad}
+                    className="rounded-xl bg-zinc-950 px-4 py-2 text-sm font-semibold text-white transition hover:bg-zinc-800"
+                  >
+                    Retry
+                  </button>
+                  <Link
+                    href="/purchase-invoice"
+                    className="rounded-xl border border-zinc-200 bg-white px-4 py-2 text-sm font-medium text-zinc-700 transition hover:bg-zinc-50"
+                  >
+                    Back to list
+                  </Link>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+    );
+  }
+
   const subtotal = payload.details.reduce((acc, item) => acc + (Number(item.qty) * Number(item.unitPrice)), 0);
   const taxAmount = payload.details.reduce((acc, item) => {
     // Basic mock: 11% tax for items that have a taxCode present
@@ -555,6 +727,16 @@ export default function PurchaseInvoiceTaskPage() {
           {statusLabel ? (
             <span className="inline-flex items-center rounded-full border border-zinc-200 bg-zinc-50 px-2.5 py-1 text-[11px] font-semibold text-zinc-600">
               {statusLabel}
+            </span>
+          ) : null}
+          {existingInvoiceNo ? (
+            <span className="inline-flex items-center rounded-full border border-emerald-200 bg-emerald-50 px-2.5 py-1 text-[11px] font-semibold text-emerald-700">
+              Submitted: {existingInvoiceNo}
+            </span>
+          ) : null}
+          {existingInvoiceCheckError ? (
+            <span className="inline-flex items-center rounded-full border border-amber-200 bg-amber-50 px-2.5 py-1 text-[11px] font-semibold text-amber-700">
+              Status check unavailable
             </span>
           ) : null}
         </div>
@@ -580,11 +762,11 @@ export default function PurchaseInvoiceTaskPage() {
           <button
             type="button"
             onClick={handleSubmit}
-            disabled={submitting}
+            disabled={submitting || alreadySubmitted}
             className="inline-flex items-center gap-2 rounded-xl bg-zinc-950 px-4 py-2 text-sm font-semibold text-white transition hover:bg-zinc-800 disabled:opacity-50"
           >
             {submitting && <Loader2 className="h-4 w-4 animate-spin" />}
-            Submit Purchase Invoice
+            {alreadySubmitted ? 'Already Submitted' : 'Submit Purchase Invoice'}
           </button>
         </div>
       </div>
@@ -606,6 +788,34 @@ export default function PurchaseInvoiceTaskPage() {
                     <FieldWarning code="creditor_not_matched" customMsg="No matching creditor found" />
                     <FieldWarning code="creditor_needs_review" customMsg="Please review creditor match" />
                   </label>
+                  {/* Auto-create creditor toggle */}
+                  {!payload.creditorCode && matches.creditor && (
+                    <button
+                      type="button"
+                      onClick={() => setCreateCreditorEnabled((v) => !v)}
+                      className={cn(
+                        'mb-2 inline-flex items-center gap-2 rounded-lg border px-3 py-1.5 text-xs font-medium transition-all',
+                        createCreditorEnabled
+                          ? 'border-emerald-300 bg-emerald-50 text-emerald-700'
+                          : 'border-zinc-200 bg-zinc-50 text-zinc-500 hover:border-zinc-300'
+                      )}
+                    >
+                      <span
+                        className={cn(
+                          'relative inline-flex h-4 w-7 shrink-0 items-center rounded-full transition-colors',
+                          createCreditorEnabled ? 'bg-emerald-500' : 'bg-zinc-300'
+                        )}
+                      >
+                        <span
+                          className={cn(
+                            'inline-block h-3 w-3 rounded-full bg-white shadow-sm transition-transform',
+                            createCreditorEnabled ? 'translate-x-3.5' : 'translate-x-0.5'
+                          )}
+                        />
+                      </span>
+                      {createCreditorEnabled ? 'Auto-create creditor enabled' : 'Auto-create creditor'}
+                    </button>
+                  )}
                   <Popover open={isCreditorOpen} onOpenChange={setIsCreditorOpen}>
                     <PopoverTrigger asChild>
                       <button
@@ -895,10 +1105,40 @@ export default function PurchaseInvoiceTaskPage() {
                 <div className="space-y-3">
                   {payload.details.map((item, index) => (
                     <div key={index} className="flex flex-col gap-1">
-                      <div className="flex gap-2 mb-1">
+                      <div className="flex flex-wrap gap-2 mb-1 items-center">
                         <FieldWarning code="item_not_matched" line={index} customMsg="Item not matched" />
                         <FieldWarning code="item_needs_review" line={index} customMsg="Please review item match" />
                         <FieldWarning code="tax_code_not_confirmed" line={index} customMsg="Review Tax Code" />
+                        {/* Auto-create item toggle */}
+                        {!item.itemCode && matches.items?.[index]?.proposedNewItem && (
+                          <button
+                            type="button"
+                            onClick={() => setCreateItemsEnabled((prev) => ({ ...prev, [index]: !prev[index] }))}
+                            className={cn(
+                              'inline-flex items-center gap-1.5 rounded-md border px-2 py-1 text-[10px] font-medium transition-all',
+                              createItemsEnabled[index]
+                                ? 'border-emerald-300 bg-emerald-50 text-emerald-700'
+                                : 'border-zinc-200 bg-zinc-50 text-zinc-500 hover:border-zinc-300'
+                            )}
+                          >
+                            <span
+                              className={cn(
+                                'relative inline-flex h-3 w-5 shrink-0 items-center rounded-full transition-colors',
+                                createItemsEnabled[index] ? 'bg-emerald-500' : 'bg-zinc-300'
+                              )}
+                            >
+                              <span
+                                className={cn(
+                                  'inline-block h-2 w-2 rounded-full bg-white shadow-sm transition-transform',
+                                  createItemsEnabled[index] ? 'translate-x-2.5' : 'translate-x-0.5'
+                                )}
+                              />
+                            </span>
+                            {createItemsEnabled[index]
+                              ? `Create: ${String((matches.items?.[index]?.proposedNewItem as any)?.itemCodeSuggestion || 'New Item')}`
+                              : 'Auto-create item'}
+                          </button>
+                        )}
                       </div>
                       <div className="grid grid-cols-[1.5fr_1fr_60px_60px_1fr_1fr_60px] gap-3 items-center">
                         <Popover 

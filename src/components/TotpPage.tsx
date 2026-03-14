@@ -26,6 +26,7 @@ function getErrorMessage(error: unknown, fallback: string) {
 export function TotpPage({ onNavigate, onVerified }: TotpPageProps) {
   const [code, setCode] = useState('');
   const [isSubmitting, setIsSubmitting] = useState(false);
+  const [qrDataUrl, setQrDataUrl] = useState<string | null>(null);
   const { pendingAuthFlow, clearPendingAuthFlow, refreshProfile } = useAuth();
 
   useEffect(() => {
@@ -33,12 +34,42 @@ export function TotpPage({ onNavigate, onVerified }: TotpPageProps) {
       onNavigate('/login');
     }
   }, [onNavigate, pendingAuthFlow]);
+  const isEnrollmentFlow = Boolean(pendingAuthFlow?.requiresEnrollment);
+  const totpUri = pendingAuthFlow?.uri ?? null;
+
+  useEffect(() => {
+    if (!isEnrollmentFlow || !totpUri) {
+      setQrDataUrl(null);
+      return;
+    }
+
+    let cancelled = false;
+    (async () => {
+      try {
+        const QRCode = await import('qrcode');
+        const url = await QRCode.toDataURL(totpUri, {
+          errorCorrectionLevel: 'M',
+          margin: 1,
+          width: 240,
+        });
+        if (!cancelled) {
+          setQrDataUrl(url);
+        }
+      } catch {
+        if (!cancelled) {
+          setQrDataUrl(null);
+        }
+      }
+    })();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [isEnrollmentFlow, totpUri]);
 
   if (!pendingAuthFlow) {
     return null;
   }
-
-  const isEnrollmentFlow = pendingAuthFlow.requiresEnrollment;
 
   const handleSubmit = async (event: React.FormEvent) => {
     event.preventDefault();
@@ -116,10 +147,13 @@ export function TotpPage({ onNavigate, onVerified }: TotpPageProps) {
             <div className="mt-6 space-y-4 rounded-3xl border border-zinc-200 bg-zinc-50 p-5">
               <div>
                 <p className="text-xs uppercase tracking-[0.24em] text-zinc-400">Authenticator QR</p>
-                <div
-                  className="mt-3 flex justify-center rounded-2xl bg-white p-4"
-                  dangerouslySetInnerHTML={{ __html: pendingAuthFlow.qrCodeSvg ?? '' }}
-                />
+                <div className="mt-3 flex justify-center rounded-2xl bg-white p-4">
+                  {qrDataUrl ? (
+                    <img src={qrDataUrl} alt="TOTP QR code" className="h-48 w-48" referrerPolicy="no-referrer" />
+                  ) : (
+                    <p className="text-sm text-zinc-500">QR code unavailable. Use the secret or URI below.</p>
+                  )}
+                </div>
               </div>
 
               <div className="grid gap-4 md:grid-cols-2">
@@ -135,6 +169,12 @@ export function TotpPage({ onNavigate, onVerified }: TotpPageProps) {
                     {pendingAuthFlow.factorId ?? '-'}
                   </p>
                 </div>
+              </div>
+              <div>
+                <p className="text-xs uppercase tracking-[0.24em] text-zinc-400">URI</p>
+                <p className="mt-2 break-all rounded-2xl bg-white px-4 py-3 font-mono text-xs text-zinc-700">
+                  {pendingAuthFlow.uri ?? '-'}
+                </p>
               </div>
             </div>
           )}

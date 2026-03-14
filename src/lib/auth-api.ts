@@ -1,3 +1,8 @@
+import { ApiRequestError } from './api-error';
+import { safeFetch } from './safe-fetch';
+
+export { ApiRequestError } from './api-error';
+
 export type AuthApiError = {
   error?: string;
   message?: string;
@@ -56,16 +61,6 @@ export type ProfileResponse = {
   mfaEnabled: boolean;
 };
 
-export class ApiRequestError extends Error {
-  status: number;
-
-  constructor(message: string, status: number) {
-    super(message);
-    this.name = 'ApiRequestError';
-    this.status = status;
-  }
-}
-
 async function parseApiError(response: Response) {
   let body: AuthApiError | null = null;
   try {
@@ -82,7 +77,7 @@ async function requestJson<T>(path: string, init: RequestInit = {}) {
     headers.set('Content-Type', 'application/json');
   }
 
-  const response = await fetch(`/api/auth${path}`, {
+  const response = await safeFetch(`/api/auth${path}`, {
     ...init,
     headers,
     credentials: 'include',

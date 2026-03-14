@@ -1,4 +1,5 @@
 import { ApiRequestError } from './auth-api';
+import { safeFetch } from './safe-fetch';
 
 export type CreditorListItem = {
   code: string;
@@ -66,7 +67,7 @@ export async function getCreditorList({ page, pageSize, sortBy, sortOrder, searc
     query.set('search', search);
   }
 
-  const response = await fetch(`/creditor/lists?${query.toString()}`, {
+  const response = await safeFetch(`/creditor/lists?${query.toString()}`, {
     method: 'GET',
     credentials: 'include',
   });

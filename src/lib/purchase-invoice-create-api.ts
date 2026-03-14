@@ -1,4 +1,5 @@
 import { ApiRequestError } from './auth-api';
+import { safeFetch } from './safe-fetch';
 
 export type PreviewTaskStatus = 'queued' | 'ocr_processing' | 'analyzing' | 'succeeded' | 'failed' | 'canceled';
 export type PreviewMatchStatus = 'matched' | 'review' | 'unmatched';
@@ -213,7 +214,7 @@ function buildPickerQuery(params?: PickerParams) {
 export async function getCreditorOptions(params?: PickerParams) {
   const query = buildPickerQuery(params);
 
-  const response = await fetch(`/purchase-invoice/creditor/options?${query.toString()}`, {
+  const response = await safeFetch(`/purchase-invoice/creditor/options?${query.toString()}`, {
     method: 'GET',
     credentials: 'include',
   });
@@ -228,7 +229,7 @@ export async function getCreditorOptions(params?: PickerParams) {
 export async function getAgentOptions(params?: PickerParams) {
   const query = buildPickerQuery(params);
 
-  const response = await fetch(`/purchase-invoice/agent/options?${query.toString()}`, {
+  const response = await safeFetch(`/purchase-invoice/agent/options?${query.toString()}`, {
     method: 'GET',
     credentials: 'include',
   });
@@ -243,7 +244,7 @@ export async function getAgentOptions(params?: PickerParams) {
 export async function getStockOptions(params?: PickerParams) {
   const query = buildPickerQuery(params);
 
-  const response = await fetch(`/purchase-invoice/stock/options?${query.toString()}`, {
+  const response = await safeFetch(`/purchase-invoice/stock/options?${query.toString()}`, {
     method: 'GET',
     credentials: 'include',
   });
@@ -259,7 +260,7 @@ export async function createPurchaseInvoicePreviewTask(file: File, options?: { s
   const formData = new FormData();
   formData.append('file', file);
 
-  const response = await fetch('/purchase-invoice/create', {
+  const response = await safeFetch('/purchase-invoice/create', {
     method: 'POST',
     body: formData,
     credentials: 'include',
@@ -274,7 +275,7 @@ export async function createPurchaseInvoicePreviewTask(file: File, options?: { s
 }
 
 export async function getPurchaseInvoicePreviewTask(taskId: string, options?: { signal?: AbortSignal }) {
-  const response = await fetch(`/purchase-invoice/create/${taskId}`, {
+  const response = await safeFetch(`/purchase-invoice/create/${taskId}`, {
     method: 'GET',
     credentials: 'include',
     signal: options?.signal,
@@ -288,7 +289,7 @@ export async function getPurchaseInvoicePreviewTask(taskId: string, options?: { 
 }
 
 export async function cancelPurchaseInvoicePreviewTask(taskId: string) {
-  const response = await fetch(`/purchase-invoice/create/${taskId}/cancel`, {
+  const response = await safeFetch(`/purchase-invoice/create/${taskId}/cancel`, {
     method: 'POST',
     credentials: 'include',
   });
