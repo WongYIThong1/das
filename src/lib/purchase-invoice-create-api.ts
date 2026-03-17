@@ -1,5 +1,13 @@
 import { ApiRequestError } from './auth-api';
-import { safeFetch } from './safe-fetch';
+import {
+  cancelMockPreviewTask,
+  createMockPreviewTask,
+  getMockAgentOptions,
+  getMockCreditorOptions,
+  getMockPreviewTask,
+  getMockStockOptions,
+  reanalyzeMockPreviewTask,
+} from './mock-data';
 
 export type PreviewTaskStatus = 'queued' | 'ocr_processing' | 'analyzing' | 'succeeded' | 'failed' | 'canceled';
 export type PreviewMatchStatus = 'matched' | 'review' | 'unmatched';
@@ -157,15 +165,6 @@ export type PurchaseInvoicePreviewTaskResponse = {
   error?: string;
 };
 
-export async function parseApiError(response: Response) {
-  try {
-    const errorBody = await response.json();
-    return errorBody.error || errorBody.message || 'An unknown error occurred';
-  } catch {
-    return 'An unknown error occurred';
-  }
-}
-
 export type PurchaseInvoicePickerPage<T> = {
   page: number;
   pageSize: number;
@@ -218,106 +217,48 @@ function buildPickerQuery(params?: PickerParams) {
 }
 
 export async function getCreditorOptions(params?: PickerParams) {
-  const query = buildPickerQuery(params);
-
-  const response = await safeFetch(`/purchase-invoice/creditor/options?${query.toString()}`, {
-    method: 'GET',
-    credentials: 'include',
-  });
-
-  if (!response.ok) {
-    throw new ApiRequestError(await parseApiError(response), response.status);
-  }
-
-  return (await response.json()) as PurchaseInvoicePickerPage<PurchaseInvoiceCreditorOption>;
+  buildPickerQuery(params);
+  return (await getMockCreditorOptions(params)) as PurchaseInvoicePickerPage<PurchaseInvoiceCreditorOption>;
 }
 
 export async function getAgentOptions(params?: PickerParams) {
-  const query = buildPickerQuery(params);
-
-  const response = await safeFetch(`/purchase-invoice/agent/options?${query.toString()}`, {
-    method: 'GET',
-    credentials: 'include',
-  });
-
-  if (!response.ok) {
-    throw new ApiRequestError(await parseApiError(response), response.status);
-  }
-
-  return (await response.json()) as PurchaseInvoicePickerPage<PurchaseInvoiceAgentOption>;
+  buildPickerQuery(params);
+  return (await getMockAgentOptions(params)) as PurchaseInvoicePickerPage<PurchaseInvoiceAgentOption>;
 }
 
 export async function getStockOptions(params?: PickerParams) {
-  const query = buildPickerQuery(params);
-
-  const response = await safeFetch(`/purchase-invoice/stock/options?${query.toString()}`, {
-    method: 'GET',
-    credentials: 'include',
-  });
-
-  if (!response.ok) {
-    throw new ApiRequestError(await parseApiError(response), response.status);
-  }
-
-  return (await response.json()) as PurchaseInvoicePickerPage<PurchaseInvoiceStockOption>;
+  buildPickerQuery(params);
+  return (await getMockStockOptions(params)) as PurchaseInvoicePickerPage<PurchaseInvoiceStockOption>;
 }
 
 export async function createPurchaseInvoicePreviewTask(file: File, options?: { signal?: AbortSignal }) {
-  const formData = new FormData();
-  formData.append('file', file);
-
-  const response = await safeFetch('/purchase-invoice/create', {
-    method: 'POST',
-    body: formData,
-    credentials: 'include',
-    signal: options?.signal,
-  });
-
-  if (!response.ok) {
-    throw new ApiRequestError(await parseApiError(response), response.status);
+  if (options?.signal?.aborted) {
+    throw new ApiRequestError('Preview cancelled.', 499);
   }
-
-  return (await response.json()) as PurchaseInvoicePreviewTaskCreateResponse;
+  return (await createMockPreviewTask(file)) as PurchaseInvoicePreviewTaskCreateResponse;
 }
 
 export async function getPurchaseInvoicePreviewTask(taskId: string, options?: { signal?: AbortSignal }) {
-  const response = await safeFetch(`/purchase-invoice/create/${taskId}`, {
-    method: 'GET',
-    credentials: 'include',
-    signal: options?.signal,
-  });
-
-  if (!response.ok) {
-    throw new ApiRequestError(await parseApiError(response), response.status);
+  if (options?.signal?.aborted) {
+    throw new ApiRequestError('Preview cancelled.', 499);
   }
-
-  return (await response.json()) as PurchaseInvoicePreviewTaskResponse;
+  try {
+    return (await getMockPreviewTask(taskId)) as PurchaseInvoicePreviewTaskResponse;
+  } catch (error) {
+    throw error instanceof ApiRequestError ? error : new ApiRequestError('Preview task not found.', 404);
+  }
 }
 
 export async function cancelPurchaseInvoicePreviewTask(taskId: string) {
-  const response = await safeFetch(`/purchase-invoice/create/${taskId}/cancel`, {
-    method: 'POST',
-    credentials: 'include',
-  });
-
-  if (!response.ok) {
-    throw new ApiRequestError(await parseApiError(response), response.status);
-  }
-
-  return true;
+  return cancelMockPreviewTask(taskId);
 }
 
 export async function reanalyzePurchaseInvoicePreviewTask(taskId: string) {
-  const response = await safeFetch(`/purchase-invoice/create/${taskId}/reanalyze`, {
-    method: 'POST',
-    credentials: 'include',
-  });
-
-  if (!response.ok) {
-    throw new ApiRequestError(await parseApiError(response), response.status);
+  try {
+    return (await reanalyzeMockPreviewTask(taskId)) as PurchaseInvoicePreviewTaskResponse;
+  } catch (error) {
+    throw error instanceof ApiRequestError ? error : new ApiRequestError('Preview task not found.', 404);
   }
-
-  return (await response.json()) as PurchaseInvoicePreviewTaskResponse;
 }
 
 export async function waitForPurchaseInvoicePreview(

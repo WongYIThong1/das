@@ -32,10 +32,12 @@
     "resolveJsonModule": true
   },
   "include": [
-    ".next/types/**/*.ts",
+    "components",
+    "lib",
     "next-env.d.ts",
+    "next.config.js",
     "src",
-    ".next-dev/types/**/*.ts"
+    ".next/types/**/*.ts"
   ],
   "exclude": [
     "node_modules"

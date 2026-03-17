@@ -26,7 +26,6 @@ function getErrorMessage(error: unknown, fallback: string) {
 export function TotpPage({ onNavigate, onVerified }: TotpPageProps) {
   const [code, setCode] = useState('');
   const [isSubmitting, setIsSubmitting] = useState(false);
-  const [qrDataUrl, setQrDataUrl] = useState<string | null>(null);
   const { pendingAuthFlow, clearPendingAuthFlow, refreshProfile } = useAuth();
 
   useEffect(() => {
@@ -35,37 +34,7 @@ export function TotpPage({ onNavigate, onVerified }: TotpPageProps) {
     }
   }, [onNavigate, pendingAuthFlow]);
   const isEnrollmentFlow = Boolean(pendingAuthFlow?.requiresEnrollment);
-  const totpUri = pendingAuthFlow?.uri ?? null;
-
-  useEffect(() => {
-    if (!isEnrollmentFlow || !totpUri) {
-      setQrDataUrl(null);
-      return;
-    }
-
-    let cancelled = false;
-    (async () => {
-      try {
-        const QRCode = await import('qrcode');
-        const url = await QRCode.toDataURL(totpUri, {
-          errorCorrectionLevel: 'M',
-          margin: 1,
-          width: 240,
-        });
-        if (!cancelled) {
-          setQrDataUrl(url);
-        }
-      } catch {
-        if (!cancelled) {
-          setQrDataUrl(null);
-        }
-      }
-    })();
-
-    return () => {
-      cancelled = true;
-    };
-  }, [isEnrollmentFlow, totpUri]);
+  const qrCodeSvg = pendingAuthFlow?.qrCodeSvg ?? null;
 
   if (!pendingAuthFlow) {
     return null;
@@ -148,8 +117,11 @@ export function TotpPage({ onNavigate, onVerified }: TotpPageProps) {
               <div>
                 <p className="text-xs uppercase tracking-[0.24em] text-zinc-400">Authenticator QR</p>
                 <div className="mt-3 flex justify-center rounded-2xl bg-white p-4">
-                  {qrDataUrl ? (
-                    <img src={qrDataUrl} alt="TOTP QR code" className="h-48 w-48" referrerPolicy="no-referrer" />
+                  {qrCodeSvg ? (
+                    <div
+                      className="h-48 w-48 [&_svg]:h-full [&_svg]:w-full"
+                      dangerouslySetInnerHTML={{ __html: qrCodeSvg }}
+                    />
                   ) : (
                     <p className="text-sm text-zinc-500">QR code unavailable. Use the secret or URI below.</p>
                   )}

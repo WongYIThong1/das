@@ -74,10 +74,10 @@ export function Sidebar() {
     try {
       await logout();
     } catch {
-      // The UI should still clear local state even if the backend session is already gone.
+      // Mock mode keeps logout non-blocking.
     }
     clearAuthState();
-    router.push('/login');
+    router.push('/purchase-invoice');
   };
   const menuGroups = [
     {

@@ -9,6 +9,10 @@ function isPublicAuthPath(pathname: string) {
   return pathname === '/login' || pathname === '/register' || pathname === '/totp' || pathname === '/toptp';
 }
 
+function isStandaloneAuthPath(pathname: string) {
+  return pathname === '/login' || pathname === '/register';
+}
+
 export default function AuthGate({ children }: { children: ReactNode }) {
   const router = useRouter();
   const pathname = usePathname() ?? '/';
@@ -73,9 +77,11 @@ export default function AuthGate({ children }: { children: ReactNode }) {
     }
 
     if (isPublicAuthPath(pathname)) {
-      if (isAuthenticated) {
-        router.replace('/purchase-invoice');
-      } else if ((pathname === '/totp' || pathname === '/toptp') && !pendingAuthFlow) {
+      if (isStandaloneAuthPath(pathname)) {
+        return;
+      }
+
+      if ((pathname === '/totp' || pathname === '/toptp') && !pendingAuthFlow) {
         router.replace('/login');
       }
       return;

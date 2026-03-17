@@ -1,5 +1,5 @@
 import { ApiRequestError } from './auth-api';
-import { safeFetch } from './safe-fetch';
+import { getMockCreditorList } from './mock-data';
 
 export type CreditorListItem = {
   code: string;
@@ -42,39 +42,10 @@ export type GetCreditorListParams = {
   search?: string;
 };
 
-async function parseApiError(response: Response) {
-  try {
-    const body = (await response.json()) as { error?: string; message?: string };
-    return body.error || body.message || `Request failed with status ${response.status}`;
-  } catch {
-    const fallbackText = await response.text().catch(() => '');
-    return fallbackText || `Request failed with status ${response.status}`;
-  }
-}
-
 export async function getCreditorList({ page, pageSize, sortBy, sortOrder, search }: GetCreditorListParams) {
-  const query = new URLSearchParams();
-  query.set('page', String(page));
-  query.set('pageSize', String(pageSize));
-
-  if (sortBy) {
-    query.set('sortBy', sortBy);
+  try {
+    return (await getMockCreditorList({ page, pageSize, sortBy, sortOrder, search })) as CreditorListResponse;
+  } catch (error) {
+    throw error instanceof ApiRequestError ? error : new ApiRequestError('Unable to load mock creditors.', 500);
   }
-  if (sortOrder) {
-    query.set('sortOrder', sortOrder);
-  }
-  if (search) {
-    query.set('search', search);
-  }
-
-  const response = await safeFetch(`/creditor/lists?${query.toString()}`, {
-    method: 'GET',
-    credentials: 'include',
-  });
-
-  if (!response.ok) {
-    throw new ApiRequestError(await parseApiError(response), response.status);
-  }
-
-  return (await response.json()) as CreditorListResponse;
 }

@@ -2,7 +2,7 @@
 
 import React, { useEffect, useRef, useState } from 'react';
 import { motion, AnimatePresence } from 'motion/react';
-import { Mail, Lock, User, KeyRound, ChevronDown } from 'lucide-react';
+import { Mail, Lock, User, ChevronDown } from 'lucide-react';
 import { toast } from 'sonner';
 import { useAuth } from './AuthProvider';
 import {
@@ -70,7 +70,6 @@ export function AuthPage({ mode, onNavigate }: AuthPageProps) {
   const [emailLocal, setEmailLocal] = useState('');
   const [password, setPassword] = useState('');
   const [username, setUsername] = useState('');
-  const [accountBookKey, setAccountBookKey] = useState('');
   const [isSubmitting, setIsSubmitting] = useState(false);
   const domainMenuRef = useRef<HTMLDivElement | null>(null);
 
@@ -122,8 +121,8 @@ export function AuthPage({ mode, onNavigate }: AuthPageProps) {
         toast.error('Please enter a valid email address.');
         return;
       }
-    } else if (!username.trim() || !trimmedEmailLocal || !password || !accountBookKey.trim()) {
-      toast.error('Username, email, password, and account book key are required.');
+    } else if (!username.trim() || !trimmedEmailLocal || !password) {
+      toast.error('Username, email, and password are required.');
       return;
     } else {
       if (!usernamePattern.test(username.trim())) {
@@ -153,7 +152,6 @@ export function AuthPage({ mode, onNavigate }: AuthPageProps) {
           username: username.trim(),
           email,
           password,
-          accountbookKey: accountBookKey.trim(),
         });
         const enrollResponse = await registerTotpEnroll(registerResponse.registrationTicket);
         setPendingAuthFlow({
@@ -352,27 +350,6 @@ export function AuthPage({ mode, onNavigate }: AuthPageProps) {
                 </div>
               )}
             </motion.div>
-
-            {mode === 'register' && (
-              <motion.div
-                initial={{ opacity: 0, y: 10 }}
-                whileInView={{ opacity: 1, y: 0 }}
-                viewport={{ once: true, amount: 0.6 }}
-                transition={{ duration: 0.3, ease: 'easeOut', delay: 0.04 }}
-              >
-                <label className="mb-2 block text-xs font-semibold uppercase tracking-wide text-zinc-500">Account Book Key</label>
-                <div className="relative">
-                  <KeyRound size={16} className="absolute left-3 top-1/2 -translate-y-1/2 text-zinc-400" />
-                  <input
-                    type="text"
-                    value={accountBookKey}
-                    onChange={(event) => setAccountBookKey(event.target.value)}
-                    placeholder="e.g. ledger-asia-001"
-                    className="w-full rounded-xl border border-zinc-200 bg-zinc-50 py-2.5 pl-10 pr-4 text-sm text-zinc-900 transition focus:border-zinc-900 focus:outline-none focus:ring-2 focus:ring-zinc-900/10"
-                  />
-                </div>
-              </motion.div>
-            )}
 
             <motion.button
               type="submit"

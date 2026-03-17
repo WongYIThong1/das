@@ -1,7 +1,7 @@
-import { ApiRequestError } from './api-error';
-import { safeFetch } from './safe-fetch';
+import { mockProfile } from './mock-data';
 
 export { ApiRequestError } from './api-error';
+import { ApiRequestError } from './api-error';
 
 export type AuthApiError = {
   error?: string;
@@ -12,7 +12,7 @@ export type RegisterStartRequest = {
   username: string;
   email: string;
   password: string;
-  accountbookKey: string;
+  accountbookKey?: string;
 };
 
 export type RegisterStartResponse = {
@@ -61,89 +61,81 @@ export type ProfileResponse = {
   mfaEnabled: boolean;
 };
 
-async function parseApiError(response: Response) {
-  let body: AuthApiError | null = null;
-  try {
-    body = (await response.json()) as AuthApiError;
-  } catch {
-    body = null;
+function delay(ms: number) {
+  return new Promise((resolve) => window.setTimeout(resolve, ms));
+}
+
+function ensureValue(value: string, message: string) {
+  if (!value.trim()) {
+    throw new ApiRequestError(message, 400);
   }
-  return body?.error || body?.message || `Request failed with status ${response.status}`;
 }
 
-async function requestJson<T>(path: string, init: RequestInit = {}) {
-  const headers = new Headers(init.headers || {});
-  if (!headers.has('Content-Type') && init.body) {
-    headers.set('Content-Type', 'application/json');
-  }
-
-  const response = await safeFetch(`/api/auth${path}`, {
-    ...init,
-    headers,
-    credentials: 'include',
-  });
-
-  if (!response.ok) {
-    throw new ApiRequestError(await parseApiError(response), response.status);
-  }
-
-  if (response.status === 204) {
-    return null as T;
-  }
-
-  return (await response.json()) as T;
+export async function registerStart(payload: RegisterStartRequest) {
+  await delay(180);
+  ensureValue(payload.username, 'Username is required.');
+  ensureValue(payload.email, 'Email is required.');
+  ensureValue(payload.password, 'Password is required.');
+  return {
+    registrationTicket: 'mock-registration-ticket',
+    nextAction: 'totp_enroll',
+  } satisfies RegisterStartResponse;
 }
 
-export function registerStart(payload: RegisterStartRequest) {
-  return requestJson<RegisterStartResponse>('/register/start', {
-    method: 'POST',
-    body: JSON.stringify(payload),
-  });
+export async function registerTotpEnroll(registrationTicket: string) {
+  await delay(180);
+  ensureValue(registrationTicket, 'Registration ticket is required.');
+  return {
+    factorId: 'mock-factor-id',
+    qrCodeSvg: '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 120 120"><rect width="120" height="120" fill="white"/><rect x="12" y="12" width="24" height="24" fill="black"/><rect x="84" y="12" width="24" height="24" fill="black"/><rect x="12" y="84" width="24" height="24" fill="black"/></svg>',
+    secret: 'MOCK-TOTP-SECRET',
+    uri: 'otpauth://totp/365BIZ:demo?secret=MOCKTOTPSECRET&issuer=365BIZ',
+  } satisfies TotpEnrollResponse;
 }
 
-export function registerTotpEnroll(registrationTicket: string) {
-  return requestJson<TotpEnrollResponse>('/register/totp/enroll', {
-    method: 'POST',
-    body: JSON.stringify({ registrationTicket }),
-  });
+export async function registerTotpVerify(payload: VerifyRegisterTotpRequest) {
+  await delay(180);
+  ensureValue(payload.registrationTicket, 'Registration ticket is required.');
+  ensureValue(payload.code, 'Verification code is required.');
+  return mockProfile;
 }
 
-export function registerTotpVerify(payload: VerifyRegisterTotpRequest) {
-  return requestJson<ProfileResponse>('/register/totp/verify', {
-    method: 'POST',
-    body: JSON.stringify(payload),
-  });
+export async function loginStart(payload: LoginStartRequest) {
+  await delay(180);
+  ensureValue(payload.identifier, 'Email or username is required.');
+  ensureValue(payload.password, 'Password is required.');
+  return {
+    loginTicket: 'mock-login-ticket',
+    requires2fa: true,
+    requires2faEnrollment: false,
+    mfaType: 'totp',
+  } satisfies LoginStartResponse;
 }
 
-export function loginStart(payload: LoginStartRequest) {
-  return requestJson<LoginStartResponse>('/login/start', {
-    method: 'POST',
-    body: JSON.stringify(payload),
-  });
+export async function loginTotpEnroll(loginTicket: string) {
+  await delay(180);
+  ensureValue(loginTicket, 'Login ticket is required.');
+  return {
+    factorId: 'mock-factor-id',
+    qrCodeSvg: '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 120 120"><rect width="120" height="120" fill="white"/><rect x="12" y="12" width="24" height="24" fill="black"/><rect x="84" y="12" width="24" height="24" fill="black"/><rect x="12" y="84" width="24" height="24" fill="black"/></svg>',
+    secret: 'MOCK-TOTP-SECRET',
+    uri: 'otpauth://totp/365BIZ:demo?secret=MOCKTOTPSECRET&issuer=365BIZ',
+  } satisfies TotpEnrollResponse;
 }
 
-export function loginTotpEnroll(loginTicket: string) {
-  return requestJson<TotpEnrollResponse>('/login/totp/enroll', {
-    method: 'POST',
-    body: JSON.stringify({ loginTicket }),
-  });
+export async function loginTotpVerify(payload: VerifyLoginTotpRequest) {
+  await delay(180);
+  ensureValue(payload.loginTicket, 'Login ticket is required.');
+  ensureValue(payload.code, 'Verification code is required.');
+  return mockProfile;
 }
 
-export function loginTotpVerify(payload: VerifyLoginTotpRequest) {
-  return requestJson<ProfileResponse>('/login/totp/verify', {
-    method: 'POST',
-    body: JSON.stringify(payload),
-  });
+export async function getProfile() {
+  await delay(120);
+  return mockProfile;
 }
 
-export function getProfile() {
-  return requestJson<ProfileResponse>('/profile', {
-    method: 'GET',
-  });
-}
-
-export function logout() {
-  return requestJson<null>('/logout', {
-    method: 'POST',
-  });
+export async function logout() {
+  await delay(100);
+  return null;
 }

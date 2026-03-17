@@ -1,5 +1,5 @@
 import { ApiRequestError } from './auth-api';
-import { safeFetch } from './safe-fetch';
+import { createMockSubmitTask, getMockSubmitTask } from './mock-data';
 
 export type PurchaseInvoiceSubmitDetail = {
   itemCode: string;
@@ -104,81 +104,29 @@ export type PurchaseInvoiceSubmitTaskResponse = {
   error?: string;
 };
 
-type PurchaseInvoiceStructuredError = PurchaseInvoiceSubmitResponse & {
-  error?: string;
-  validation?: unknown;
-};
-
-async function parseApiBody<T>(response: Response) {
-  try {
-    return (await response.json()) as T;
-  } catch {
-    return null;
-  }
-}
-
-async function parseApiError(response: Response) {
-  const body = await parseApiBody<{ error?: string; message?: string; requestId?: string; previewTaskId?: string; target?: string }>(response);
-  if (body) {
-    const base = body.error || body.message || `Request failed with status ${response.status}`;
-    const parts = [
-      typeof body.requestId === 'string' && body.requestId ? `requestId=${body.requestId}` : null,
-      typeof body.previewTaskId === 'string' && body.previewTaskId ? `previewTaskId=${body.previewTaskId}` : null,
-      typeof body.target === 'string' && body.target ? `target=${body.target}` : null,
-    ].filter((value): value is string => Boolean(value));
-
-    return parts.length > 0 ? `${base} (${parts.join(', ')})` : base;
-  }
-
-  const fallbackText = await response.text().catch(() => '');
-  return fallbackText || `Request failed with status ${response.status}`;
-}
-
 export async function submitPurchaseInvoice(request: PurchaseInvoiceSubmitRequest) {
-  const response = await safeFetch('/purchase-invoice/submit', {
-    method: 'POST',
-    credentials: 'include',
-    headers: {
-      'Content-Type': 'application/json',
-    },
-    body: JSON.stringify(request),
-  });
-
-  const fallbackResponse = response.clone();
-  const body = await parseApiBody<PurchaseInvoiceStructuredError | PurchaseInvoiceSubmitTaskCreateResponse>(response);
-  if (!body) {
-    throw new ApiRequestError(`Request failed with status ${response.status}`, response.status);
+  try {
+    return {
+      ...(await createMockSubmitTask(request)),
+      httpStatus: 202,
+    } satisfies PurchaseInvoiceSubmitEnvelope;
+  } catch (error) {
+    if (error instanceof ApiRequestError) {
+      throw error;
+    }
+    throw new ApiRequestError('Unable to submit mock purchase invoice.', 500);
   }
-
-  const anyBody = body as Record<string, unknown>;
-  const hasStructuredResult =
-    typeof anyBody.requestId === 'string' ||
-    'purchaseInvoice' in anyBody ||
-    'creditorCreate' in anyBody ||
-    'stockCreates' in anyBody;
-
-  if (!response.ok && !hasStructuredResult) {
-    const structured = body as PurchaseInvoiceStructuredError;
-    throw new ApiRequestError(structured.error || structured.message || (await parseApiError(fallbackResponse)), response.status);
-  }
-
-  return {
-    ...(body as PurchaseInvoiceStructuredError),
-    httpStatus: response.status,
-  } satisfies PurchaseInvoiceSubmitEnvelope;
 }
 
 export async function getPurchaseInvoiceSubmitTask(taskId: string) {
-  const response = await safeFetch(`/purchase-invoice/submit/${taskId}`, {
-    method: 'GET',
-    credentials: 'include',
-  });
-
-  if (!response.ok) {
-    throw new ApiRequestError(await parseApiError(response), response.status);
+  try {
+    return (await getMockSubmitTask(taskId)) as PurchaseInvoiceSubmitTaskResponse;
+  } catch (error) {
+    if (error instanceof ApiRequestError) {
+      throw error;
+    }
+    throw new ApiRequestError('Submit task not found.', 404);
   }
-
-  return (await response.json()) as PurchaseInvoiceSubmitTaskResponse;
 }
 
 export async function waitForPurchaseInvoiceSubmit(
