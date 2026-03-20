@@ -1,4 +1,5 @@
 import { NextResponse } from 'next/server';
+import { validateInvoiceUploadFile } from '../../../../lib/upload-validation';
 
 function getBackendBaseUrl() {
   const baseUrl = process.env.BACKEND_BASE_URL?.trim();
@@ -22,9 +23,17 @@ export async function POST(request: Request) {
   try {
     const incoming = await request.formData();
     const form = new FormData();
-    const fileEntry = incoming.get('file');
+    const fileEntries = incoming.getAll('file');
+    if (fileEntries.length !== 1) {
+      return NextResponse.json({ error: 'invalid_file_count' }, { status: 400 });
+    }
+    const fileEntry = fileEntries[0];
     if (!fileEntry) {
       return NextResponse.json({ error: 'missing_file' }, { status: 400 });
+    }
+    const validationError = validateInvoiceUploadFile(fileEntry);
+    if (validationError) {
+      return NextResponse.json({ error: validationError }, { status: 400 });
     }
     form.append('file', fileEntry);
 

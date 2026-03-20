@@ -67,13 +67,7 @@ export function TotpPage({ onNavigate, onVerified }: TotpPageProps) {
     setIsSubmitting(true);
     try {
       if (pendingAuthFlow.mode === 'register') {
-        if (!pendingAuthFlow.email || !pendingAuthFlow.password) {
-          throw new Error('Missing MFA setup credentials for registration.');
-        }
-
         await registerMfaConfirm({
-          email: pendingAuthFlow.email,
-          password: pendingAuthFlow.password,
           totpCode: sanitizedCode,
         });
 
@@ -84,7 +78,6 @@ export function TotpPage({ onNavigate, onVerified }: TotpPageProps) {
         return;
       } else {
         const session = await completeLoginMfa({
-          mfaToken: pendingAuthFlow.mfaToken,
           totpCode: sanitizedCode,
         });
         setSession(session);

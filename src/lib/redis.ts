@@ -5,7 +5,11 @@ type AppRedisClient = ReturnType<typeof createClient>;
 let redisClientPromise: Promise<AppRedisClient> | null = null;
 
 function getRedisUrl() {
-  return process.env.REDIS_URL?.trim() || 'redis://ubuntu:root@192.168.11.166:6379';
+  const redisUrl = process.env.REDIS_URL?.trim();
+  if (!redisUrl) {
+    throw new Error('REDIS_URL is required');
+  }
+  return redisUrl;
 }
 
 export async function getRedisClient() {

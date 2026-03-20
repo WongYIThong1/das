@@ -28,7 +28,7 @@ export async function POST(request: Request) {
     if (!response.ok) {
       const err = (data as any) ?? {};
       return NextResponse.json(
-        { error: err.error ?? err.message ?? text.slice(0, 200) || 'upstream_error' },
+        { error: err.error ?? err.message ?? (text.slice(0, 200) || 'upstream_error') },
         { status: response.status },
       );
     }

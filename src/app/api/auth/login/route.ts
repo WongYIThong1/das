@@ -1,6 +1,7 @@
 import { NextResponse } from 'next/server';
 import { applySetCookies, jsonError } from '../../../../lib/auth-route';
 import { proxyAuthRequest } from '../../../../lib/auth-server';
+import { setAppSessionCookie } from '../../../../lib/session-cookie';
 
 export async function POST(request: Request) {
   const payload = (await request.json().catch(() => null)) as {
@@ -18,7 +19,13 @@ export async function POST(request: Request) {
   );
 
   if (result.ok) {
-    return applySetCookies(NextResponse.json(result.data, { status: result.status }), result.setCookies);
+    const response = applySetCookies(NextResponse.json(result.data, { status: result.status }), result.setCookies);
+    const sessionLike = result.data as { accessToken?: unknown; expiresIn?: unknown } | null;
+    if (typeof sessionLike?.accessToken === 'string') {
+      const expiresIn = typeof sessionLike.expiresIn === 'number' ? sessionLike.expiresIn : undefined;
+      setAppSessionCookie(response, { expiresInSeconds: expiresIn });
+    }
+    return response;
   }
 
   if ('error' in result) {
