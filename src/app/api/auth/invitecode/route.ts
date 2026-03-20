@@ -35,7 +35,7 @@ async function handleInviteCode(request: Request, inviteCode: string) {
     return redirectTo(request, '/login');
   }
 
-  const response = redirectTo(request, '/register');
+  const response = redirectTo(request, `/register?inviteCode=${encodeURIComponent(normalizedInviteCode)}`);
   response.cookies.set('activeInviteCode', normalizedInviteCode, {
     httpOnly: true,
     sameSite: 'lax',

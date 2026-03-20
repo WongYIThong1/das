@@ -80,6 +80,7 @@ export function AuthPage({ mode, inviteCode, onNavigate }: AuthPageProps) {
   const [username, setUsername] = useState('');
   const [isSubmitting, setIsSubmitting] = useState(false);
   const domainMenuRef = useRef<HTMLDivElement | null>(null);
+  const resolvedInviteCode = inviteCode?.trim() || activeInviteCode?.trim() || null;
 
   const getPasswordStrength = (value: string) => {
     if (!value) {
@@ -144,7 +145,7 @@ export function AuthPage({ mode, inviteCode, onNavigate }: AuthPageProps) {
       toast.error('Username, email, and password are required.');
       return;
     } else {
-      if (!activeInviteCode?.trim()) {
+      if (!resolvedInviteCode) {
         toast.error('Please use a valid invite link to create your account.');
         return;
       }
@@ -175,7 +176,7 @@ export function AuthPage({ mode, inviteCode, onNavigate }: AuthPageProps) {
           name: username.trim(),
           email,
           password,
-          inviteCode: activeInviteCode,
+          inviteCode: resolvedInviteCode,
         });
         const enrollResponse = await registerMfaSetup({
           email,
@@ -189,7 +190,7 @@ export function AuthPage({ mode, inviteCode, onNavigate }: AuthPageProps) {
           qrImageSrc: `data:image/png;base64,${enrollResponse.qrPngBase64}`,
           email,
           password,
-          inviteCode: activeInviteCode,
+          inviteCode: resolvedInviteCode,
           identifierOrEmail: email,
         });
         setPendingAuthFlow(pendingResponse.pendingAuthFlow);
