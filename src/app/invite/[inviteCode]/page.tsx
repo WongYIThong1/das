@@ -23,7 +23,7 @@ export default async function InvitePage({ params }: InvitePageProps) {
 
   const cookieStore = await cookies();
   cookieStore.set('activeInviteCode', normalizedInviteCode, {
-    httpOnly: false,
+    httpOnly: true,
     sameSite: 'lax',
     secure: process.env.NODE_ENV === 'production',
     path: '/',

@@ -14,5 +14,10 @@ export async function GET() {
     return NextResponse.json({ error: 'not_found' }, { status: 404 });
   }
 
-  return NextResponse.json({ pendingAuthFlow }, { status: 200 });
+  const sanitizedPendingAuthFlow =
+    pendingAuthFlow.mode === 'register'
+      ? { ...pendingAuthFlow, password: undefined }
+      : { ...pendingAuthFlow, mfaToken: undefined };
+
+  return NextResponse.json({ pendingAuthFlow: sanitizedPendingAuthFlow }, { status: 200 });
 }

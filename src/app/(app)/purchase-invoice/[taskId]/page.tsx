@@ -201,48 +201,6 @@ export default function PurchaseInvoiceTaskPage({ taskIdOverride, isGroup = fals
     }
   };
 
-  // Preload picker options as soon as the user enters the page, so the first open
-  // of the dropdown is instant (no need to type before seeing options).
-  useEffect(() => {
-    let cancelled = false;
-
-    const preload = async () => {
-      try {
-        setIsCreditorLoading(true);
-        const creditors = await getCreditorOptions({ page: 1, pageSize: 20 }, accessToken ?? undefined);
-        if (!cancelled) {
-          setCreditorOptions(creditors.items || []);
-          setCreditorPage(creditors.page ?? 1);
-          setCreditorTotalPages(creditors.totalPages ?? 1);
-        }
-      } catch (error) {
-        // keep silent: user can still search/open dropdown which will retry
-        console.error('Creditor preload error:', error);
-      } finally {
-        if (!cancelled) setIsCreditorLoading(false);
-      }
-
-      try {
-        setIsAgentLoading(true);
-        const agents = await getAgentOptions({ page: 1, pageSize: 20 }, accessToken ?? undefined);
-        if (!cancelled) {
-          setAgentOptions(agents.items || []);
-          setAgentPage(agents.page ?? 1);
-          setAgentTotalPages(agents.totalPages ?? 1);
-        }
-      } catch (error) {
-        console.error('Agent preload error:', error);
-      } finally {
-        if (!cancelled) setIsAgentLoading(false);
-      }
-    };
-
-    void preload();
-    return () => {
-      cancelled = true;
-    };
-  }, [accessToken]);
-
   // Fetch group items for the stats modal when opened on a batch item page.
   // Uses SSE for real-time updates with a polling fallback.
   useEffect(() => {
@@ -880,14 +838,12 @@ export default function PurchaseInvoiceTaskPage({ taskIdOverride, isGroup = fals
   const handleSubmit = async () => {
     const req = buildSubmitRequest();
     if (!req) return;
-    console.log('[Submit] request payload:', JSON.stringify(req, null, 2));
     await startSubmit(req);
   };
 
   const handleSubmitSilent = async () => {
     const req = buildSubmitRequest();
     if (!req) return;
-    console.log('[Submit silent] request payload:', JSON.stringify(req, null, 2));
     await startSubmit(req, { silent: true });
   };
 

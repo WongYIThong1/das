@@ -24,7 +24,10 @@ export async function POST(request: Request) {
     try { data = JSON.parse(text); } catch { /* non-JSON */ }
     if (!response.ok) {
       const err = (data as any) ?? {};
-      return NextResponse.json({ error: err.error ?? err.message ?? text.slice(0, 200) || 'upstream_error' }, { status: response.status });
+      return NextResponse.json(
+        { error: err.error ?? err.message ?? (text.slice(0, 200) || 'upstream_error') },
+        { status: response.status }
+      );
     }
     return NextResponse.json(data, { status: response.status });
   } catch {

@@ -19,6 +19,8 @@ const PHASE_LABEL: Record<BatchItemPhase, string> = {
   pending:          'Pending',
   queued:           'Queued',
   ocr_processing:   'Reading',
+  reanalyze_queued: 'Queued for Reanalyze',
+  reanalyzing:      'Reanalyzing',
   analyzing:        'Analysing',
   succeeded:        'Ready',
   failed:           'Failed',
@@ -36,6 +38,8 @@ const PHASE_STYLE: Record<BatchItemPhase, string> = {
   pending:          'bg-zinc-100 text-zinc-400',
   queued:           'bg-sky-100 text-sky-700',
   ocr_processing:   'bg-amber-100 text-amber-700',
+  reanalyze_queued: 'bg-amber-100 text-amber-700',
+  reanalyzing:      'bg-violet-100 text-violet-700',
   analyzing:        'bg-violet-100 text-violet-700',
   succeeded:        'bg-emerald-100 text-emerald-700',
   failed:           'bg-red-100 text-red-600',
@@ -49,7 +53,16 @@ const PHASE_STYLE: Record<BatchItemPhase, string> = {
   not_ready:        'bg-zinc-100 text-zinc-400',
 };
 
-const ACTIVE_PHASES   = new Set<BatchItemPhase>(['queued', 'ocr_processing', 'analyzing', 'submit_queued', 'submitting_stock', 'submitting_pi']);
+const ACTIVE_PHASES   = new Set<BatchItemPhase>([
+  'queued',
+  'ocr_processing',
+  'reanalyze_queued',
+  'reanalyzing',
+  'analyzing',
+  'submit_queued',
+  'submitting_stock',
+  'submitting_pi',
+]);
 const TERMINAL_PHASES = new Set<BatchItemPhase>(['succeeded', 'failed', 'canceled', 'cancelled', 'submitted', 'submit_failed', 'not_ready']);
 const SUBMIT_PHASES   = new Set<BatchItemPhase>(['submit_queued', 'submitting_stock', 'submitting_pi', 'submitted', 'submit_failed', 'not_ready']);
 
