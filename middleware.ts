@@ -28,6 +28,15 @@ function buildRedirectResponse(request: NextRequest, pathname: string) {
   return NextResponse.redirect(target);
 }
 
+function buildRefreshBootstrapResponse(request: NextRequest) {
+  const target = request.nextUrl.clone();
+  target.pathname = '/api/auth/refresh';
+  target.search = '';
+  const redirectPath = `${request.nextUrl.pathname}${request.nextUrl.search}`;
+  target.searchParams.set('redirect', redirectPath || '/home');
+  return NextResponse.redirect(target);
+}
+
 export function middleware(request: NextRequest) {
   const { pathname } = request.nextUrl;
 
@@ -62,13 +71,7 @@ export function middleware(request: NextRequest) {
   }
 
   if (!hasSession) {
-    const target = request.nextUrl.clone();
-    target.pathname = '/login';
-    target.search = '';
-    if (pathname !== '/') {
-      target.searchParams.set('redirect', pathname);
-    }
-    return NextResponse.redirect(target);
+    return buildRefreshBootstrapResponse(request);
   }
 
   return NextResponse.next();
