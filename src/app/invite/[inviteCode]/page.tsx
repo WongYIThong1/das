@@ -1,6 +1,4 @@
-import { cookies } from 'next/headers';
 import { redirect } from 'next/navigation';
-import { verifyInviteCode } from '../../../lib/invitecode-server';
 
 interface InvitePageProps {
   params: Promise<{
@@ -16,19 +14,5 @@ export default async function InvitePage({ params }: InvitePageProps) {
     redirect('/login');
   }
 
-  const result = await verifyInviteCode(normalizedInviteCode);
-  if (!result.ok) {
-    redirect('/login');
-  }
-
-  const cookieStore = await cookies();
-  cookieStore.set('activeInviteCode', normalizedInviteCode, {
-    httpOnly: true,
-    sameSite: 'lax',
-    secure: process.env.NODE_ENV === 'production',
-    path: '/',
-    maxAge: 60 * 60,
-  });
-
-  redirect('/register');
+  redirect(`/api/auth/invitecode?inviteCode=${encodeURIComponent(normalizedInviteCode)}`);
 }
