@@ -17,9 +17,10 @@ function getPublicOrigin(request: Request) {
 }
 
 function redirectTo(request: Request, pathname: string) {
-  const url = new URL(pathname, getPublicOrigin(request));
-  url.pathname = pathname;
-  url.search = '';
+  const url = new URL(getPublicOrigin(request));
+  const [cleanPathname, search = ''] = pathname.split('?');
+  url.pathname = cleanPathname;
+  url.search = search ? `?${search}` : '';
   return NextResponse.redirect(url);
 }
 
