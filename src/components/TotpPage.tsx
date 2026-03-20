@@ -2,11 +2,11 @@
 
 import { useEffect, useState } from 'react';
 import { motion } from 'motion/react';
-import { ArrowLeft, ShieldCheck } from 'lucide-react';
+import { ArrowLeft, Copy, ShieldCheck } from 'lucide-react';
 import { toast } from 'sonner';
 import { useAuth } from './AuthProvider';
 import { InputOTP, InputOTPGroup, InputOTPSlot } from './ui/input-otp';
-import { ApiRequestError, loginTotpVerify, registerTotpVerify } from '../lib/auth-api';
+import { ApiRequestError, completeLoginMfa, registerMfaConfirm } from '../lib/auth-api';
 
 interface TotpPageProps {
   onNavigate: (path: string) => void;
@@ -26,19 +26,31 @@ function getErrorMessage(error: unknown, fallback: string) {
 export function TotpPage({ onNavigate, onVerified }: TotpPageProps) {
   const [code, setCode] = useState('');
   const [isSubmitting, setIsSubmitting] = useState(false);
-  const { pendingAuthFlow, clearPendingAuthFlow, refreshProfile } = useAuth();
+  const { pendingAuthFlow, clearActiveInviteCode, clearPendingAuthFlow, setSession } = useAuth();
 
   useEffect(() => {
     if (!pendingAuthFlow) {
       onNavigate('/login');
     }
   }, [onNavigate, pendingAuthFlow]);
-  const isEnrollmentFlow = Boolean(pendingAuthFlow?.requiresEnrollment);
-  const qrCodeSvg = pendingAuthFlow?.qrCodeSvg ?? null;
 
   if (!pendingAuthFlow) {
     return null;
   }
+
+  const isEnrollmentFlow = Boolean(pendingAuthFlow.requiresEnrollment);
+  const qrImageSrc = pendingAuthFlow.mode === 'register' ? pendingAuthFlow.qrImageSrc ?? null : null;
+  const otpUri = pendingAuthFlow.mode === 'register' ? pendingAuthFlow.otpauth ?? null : null;
+  const registerSecret = pendingAuthFlow.mode === 'register' ? pendingAuthFlow.secret ?? null : null;
+
+  const handleCopy = async (value: string, label: string) => {
+    try {
+      await navigator.clipboard.writeText(value);
+      toast.success(`${label} copied.`);
+    } catch {
+      toast.error(`Unable to copy ${label.toLowerCase()}.`);
+    }
+  };
 
   const handleSubmit = async (event: React.FormEvent) => {
     event.preventDefault();
@@ -55,27 +67,30 @@ export function TotpPage({ onNavigate, onVerified }: TotpPageProps) {
     setIsSubmitting(true);
     try {
       if (pendingAuthFlow.mode === 'register') {
-        if (!pendingAuthFlow.factorId) {
-          throw new Error('Missing TOTP factor for registration.');
+        if (!pendingAuthFlow.email || !pendingAuthFlow.password) {
+          throw new Error('Missing MFA setup credentials for registration.');
         }
-        await registerTotpVerify({
-          registrationTicket: pendingAuthFlow.ticket,
-          factorId: pendingAuthFlow.factorId,
-          code: sanitizedCode,
+
+        await registerMfaConfirm({
+          email: pendingAuthFlow.email,
+          password: pendingAuthFlow.password,
+          totpCode: sanitizedCode,
         });
+
+        await clearPendingAuthFlow();
+        clearActiveInviteCode();
+        toast.success('Registration complete. Sign in to continue.');
+        onNavigate('/login');
+        return;
       } else {
-        await loginTotpVerify({
-          loginTicket: pendingAuthFlow.ticket,
-          factorId: pendingAuthFlow.factorId,
-          code: sanitizedCode,
+        const session = await completeLoginMfa({
+          mfaToken: pendingAuthFlow.mfaToken,
+          totpCode: sanitizedCode,
         });
+        setSession(session);
       }
 
-      clearPendingAuthFlow();
-      const profile = await refreshProfile();
-      if (!profile) {
-        throw new Error('Session was created, but profile loading failed.');
-      }
+      await clearPendingAuthFlow();
       toast.success('2FA verified. Workspace ready.');
       onVerified();
     } catch (error) {
@@ -117,10 +132,11 @@ export function TotpPage({ onNavigate, onVerified }: TotpPageProps) {
               <div>
                 <p className="text-xs uppercase tracking-[0.24em] text-zinc-400">Authenticator QR</p>
                 <div className="mt-3 flex justify-center rounded-2xl bg-white p-4">
-                  {qrCodeSvg ? (
-                    <div
-                      className="h-48 w-48 [&_svg]:h-full [&_svg]:w-full"
-                      dangerouslySetInnerHTML={{ __html: qrCodeSvg }}
+                  {qrImageSrc ? (
+                    <img
+                      src={qrImageSrc}
+                      alt="Authenticator QR code"
+                      className="h-48 w-48"
                     />
                   ) : (
                     <p className="text-sm text-zinc-500">QR code unavailable. Use the secret or URI below.</p>
@@ -128,24 +144,29 @@ export function TotpPage({ onNavigate, onVerified }: TotpPageProps) {
                 </div>
               </div>
 
-              <div className="grid gap-4 md:grid-cols-2">
+              <div className="grid gap-4">
                 <div>
                   <p className="text-xs uppercase tracking-[0.24em] text-zinc-400">Secret</p>
-                  <p className="mt-2 break-all rounded-2xl bg-white px-4 py-3 font-mono text-sm text-zinc-900">
-                    {pendingAuthFlow.secret ?? '-'}
-                  </p>
-                </div>
-                <div>
-                  <p className="text-xs uppercase tracking-[0.24em] text-zinc-400">Factor ID</p>
-                  <p className="mt-2 break-all rounded-2xl bg-white px-4 py-3 font-mono text-sm text-zinc-900">
-                    {pendingAuthFlow.factorId ?? '-'}
-                  </p>
+                  <div className="mt-2 flex w-full items-center gap-2 rounded-2xl bg-white px-4 py-3">
+                    <p className="min-w-0 flex-1 overflow-x-auto whitespace-nowrap font-mono text-sm text-zinc-900 [scrollbar-width:none] [-ms-overflow-style:none] [&::-webkit-scrollbar]:hidden">
+                      {registerSecret ?? '-'}
+                    </p>
+                    <button
+                      type="button"
+                      onClick={() => registerSecret && void handleCopy(registerSecret, 'Secret')}
+                      disabled={!registerSecret}
+                      className="inline-flex h-9 w-9 shrink-0 items-center justify-center rounded-full border border-zinc-200 text-zinc-500 transition hover:border-zinc-300 hover:text-zinc-900 disabled:cursor-not-allowed disabled:opacity-40"
+                      aria-label="Copy secret"
+                    >
+                      <Copy size={16} />
+                    </button>
+                  </div>
                 </div>
               </div>
               <div>
-                <p className="text-xs uppercase tracking-[0.24em] text-zinc-400">URI</p>
+                <p className="text-xs uppercase tracking-[0.24em] text-zinc-400">OTP URI</p>
                 <p className="mt-2 break-all rounded-2xl bg-white px-4 py-3 font-mono text-xs text-zinc-700">
-                  {pendingAuthFlow.uri ?? '-'}
+                  {otpUri ?? '-'}
                 </p>
               </div>
             </div>
@@ -180,8 +201,12 @@ export function TotpPage({ onNavigate, onVerified }: TotpPageProps) {
               <button
                 type="button"
                 onClick={() => {
-                  clearPendingAuthFlow();
-                  onNavigate(pendingAuthFlow.mode === 'register' ? '/register' : '/login');
+                  void clearPendingAuthFlow();
+                  onNavigate(
+                    pendingAuthFlow.mode === 'register'
+                      ? '/register'
+                      : '/login'
+                  );
                 }}
                 className="inline-flex items-center gap-2 text-sm font-medium text-zinc-500 transition hover:text-zinc-950"
               >

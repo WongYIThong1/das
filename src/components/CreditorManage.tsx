@@ -34,6 +34,7 @@ import type {
 } from '../lib/creditor-api';
 import { getCreditorList } from '../lib/creditor-api';
 
+
 type SortOption = {
   label: string;
   sortBy: CreditorSortBy;
@@ -45,7 +46,15 @@ type AutoRefreshOption = {
   intervalMs: number | null;
 };
 
-type CreditorQuery = Omit<GetCreditorListParams, 'page' | 'pageSize'>;
+type CreditorQuery = Omit<GetCreditorListParams, 'pageSize' | 'page' | 'accessToken' | 'bookId'>;
+
+type PrefetchedCreditorPage = {
+  queryKey: string;
+  page: number;
+  items: CreditorListItem[];
+  total: number;
+  hasNext: boolean;
+};
 
 const PAGE_SIZE = 20;
 
@@ -56,14 +65,6 @@ const sortOptions: SortOption[] = [
   { label: 'Code Z-A', sortBy: 'code', sortOrder: 'desc' },
   { label: 'Currency A-Z', sortBy: 'currency', sortOrder: 'asc' },
   { label: 'Currency Z-A', sortBy: 'currency', sortOrder: 'desc' },
-  { label: 'Type A-Z', sortBy: 'type', sortOrder: 'asc' },
-  { label: 'Type Z-A', sortBy: 'type', sortOrder: 'desc' },
-  { label: 'Agent A-Z', sortBy: 'agent', sortOrder: 'asc' },
-  { label: 'Agent Z-A', sortBy: 'agent', sortOrder: 'desc' },
-  { label: 'Area A-Z', sortBy: 'area', sortOrder: 'asc' },
-  { label: 'Area Z-A', sortBy: 'area', sortOrder: 'desc' },
-  { label: 'Active first', sortBy: 'active', sortOrder: 'desc' },
-  { label: 'Inactive first', sortBy: 'active', sortOrder: 'asc' },
 ];
 
 const autoRefreshOptions: AutoRefreshOption[] = [
@@ -84,28 +85,28 @@ function getErrorMessage(error: unknown, fallback: string) {
 
 export function CreditorManage() {
   const router = useRouter();
-  const { clearAuthState } = useAuth();
+  const { profile, accessToken, clearAuthState } = useAuth();
   const [items, setItems] = useState<CreditorListItem[]>([]);
-  const [page, setPage] = useState(0);
   const [total, setTotal] = useState(0);
-  const [totalPages, setTotalPages] = useState(0);
-  const [company, setCompany] = useState('');
-  const [bookId, setBookId] = useState('');
+  const [currentPage, setCurrentPage] = useState(1);
+  const [hasNext, setHasNext] = useState(false);
   const [searchQuery, setSearchQuery] = useState('');
   const [debouncedSearch, setDebouncedSearch] = useState('');
+  const [prefetchedPage, setPrefetchedPage] = useState<PrefetchedCreditorPage | null>(null);
   const [isDisplayOpen, setIsDisplayOpen] = useState(false);
   const [selectedSortLabel, setSelectedSortLabel] = useState(sortOptions[0].label);
   const [selectedAutoRefreshLabel, setSelectedAutoRefreshLabel] = useState(autoRefreshOptions[0].label);
   const [isInitialLoading, setIsInitialLoading] = useState(true);
   const [isFetchingNextPage, setIsFetchingNextPage] = useState(false);
+  const [isPrefetchingNextPage, setIsPrefetchingNextPage] = useState(false);
   const [initialError, setInitialError] = useState<string | null>(null);
   const [nextPageError, setNextPageError] = useState<string | null>(null);
   const displayMenuRef = useRef<HTMLDivElement>(null);
   const scrollContainerRef = useRef<HTMLDivElement | null>(null);
   const loadMoreRef = useRef<HTMLDivElement | null>(null);
   const latestQueryKeyRef = useRef('');
-
-  const hasMore = totalPages > 0 && page < totalPages;
+  const prefetchRequestKeyRef = useRef<string | null>(null);
+  const prefetchedPageRef = useRef<PrefetchedCreditorPage | null>(null);
   const selectedSortOption = useMemo(
     () => sortOptions.find((option) => option.label === selectedSortLabel) ?? sortOptions[0],
     [selectedSortLabel]
@@ -123,13 +124,116 @@ export function CreditorManage() {
     [debouncedSearch, selectedSortOption]
   );
 
+  useEffect(() => {
+    prefetchedPageRef.current = prefetchedPage;
+  }, [prefetchedPage]);
+
   const handleAuthFailure = useCallback(() => {
-    clearAuthState();
+    void clearAuthState();
     router.replace('/login');
   }, [clearAuthState, router]);
 
+  const fetchCreditors = useCallback(
+    async (page: number, query: CreditorQuery) => {
+      if (!profile || !accessToken) {
+        throw new ApiRequestError('Your session is not ready yet.', 401);
+      }
+
+      return getCreditorList({
+        pageSize: PAGE_SIZE,
+        page,
+        accessToken,
+        bookId: profile.bookId,
+        ...query,
+      });
+    },
+    [accessToken, profile]
+  );
+
+  const applyCreditorPage = useCallback(
+    (
+      response: {
+        items: CreditorListItem[];
+        total: number;
+        page: number;
+        hasNext: boolean;
+      },
+      mode: 'replace' | 'append'
+    ) => {
+      setTotal(response.total);
+      setCurrentPage(response.page);
+      setHasNext(response.hasNext);
+      setItems((current) => {
+        if (mode === 'replace') {
+          return response.items;
+        }
+
+        const existingCodes = new Set(current.map((item) => item.code));
+        const appended = response.items.filter((item) => !existingCodes.has(item.code));
+        return current.concat(appended);
+      });
+    },
+    []
+  );
+
+  const prefetchCreditors = useCallback(
+    async (hasNextPage: boolean, loadedPage: number, query: CreditorQuery) => {
+      const queryKey = JSON.stringify(query);
+
+      if (!hasNextPage) {
+        prefetchRequestKeyRef.current = null;
+        setPrefetchedPage(null);
+        setIsPrefetchingNextPage(false);
+        return;
+      }
+
+      if (latestQueryKeyRef.current !== queryKey) {
+        return;
+      }
+
+      const nextPage = loadedPage + 1;
+
+      if (prefetchedPageRef.current?.queryKey === queryKey && prefetchedPageRef.current.page === nextPage) {
+        return;
+      }
+
+      const requestKey = `${queryKey}:${nextPage}`;
+      if (prefetchRequestKeyRef.current === requestKey) {
+        return;
+      }
+
+      prefetchRequestKeyRef.current = requestKey;
+      setIsPrefetchingNextPage(true);
+
+      try {
+        const response = await fetchCreditors(nextPage, query);
+        if (latestQueryKeyRef.current !== queryKey || prefetchRequestKeyRef.current !== requestKey) {
+          return;
+        }
+
+        setPrefetchedPage({
+          queryKey,
+          page: nextPage,
+          items: response.items,
+          total: response.total,
+          hasNext: response.hasNext,
+        });
+      } catch {
+        if (latestQueryKeyRef.current === queryKey && prefetchRequestKeyRef.current === requestKey) {
+          setPrefetchedPage(null);
+        }
+      } finally {
+        if (prefetchRequestKeyRef.current === requestKey) {
+          prefetchRequestKeyRef.current = null;
+          setIsPrefetchingNextPage(false);
+        }
+      }
+    },
+    [fetchCreditors]
+  );
+
   const loadCreditors = useCallback(
-    async (targetPage: number, mode: 'replace' | 'append', query: CreditorQuery) => {
+    async (page: number, mode: 'replace' | 'append', query: CreditorQuery) => {
       const queryKey = JSON.stringify(query);
 
       if (mode === 'replace') {
@@ -142,26 +246,15 @@ export function CreditorManage() {
       }
 
       try {
-        const response = await getCreditorList({ page: targetPage, pageSize: PAGE_SIZE, ...query });
+        const response = await fetchCreditors(page, query);
 
         if (latestQueryKeyRef.current !== queryKey) {
           return;
         }
 
-        setPage(response.page);
-        setTotal(response.total);
-        setTotalPages(response.totalPages);
-        setCompany(response.company);
-        setBookId(response.bookId);
-        setItems((current) => {
-          if (mode === 'replace') {
-            return response.items;
-          }
-
-          const existingCodes = new Set(current.map((item) => item.code));
-          const appended = response.items.filter((item) => !existingCodes.has(item.code));
-          return current.concat(appended);
-        });
+        applyCreditorPage(response, mode);
+        setPrefetchedPage(null);
+        void prefetchCreditors(response.hasNext, response.page, query);
       } catch (error) {
         if (latestQueryKeyRef.current !== queryKey) {
           return;
@@ -190,8 +283,62 @@ export function CreditorManage() {
         }
       }
     },
-    [handleAuthFailure]
+    [applyCreditorPage, fetchCreditors, handleAuthFailure, prefetchCreditors]
   );
+
+  const loadNextPage = useCallback(async () => {
+    if (!hasNext || isInitialLoading || isFetchingNextPage || !profile) {
+      return;
+    }
+
+    const queryKey = JSON.stringify(currentQuery);
+    const nextPage = currentPage + 1;
+    setNextPageError(null);
+    setIsFetchingNextPage(true);
+
+    try {
+      const response =
+        prefetchedPageRef.current?.queryKey === queryKey && prefetchedPageRef.current.page === nextPage
+          ? prefetchedPageRef.current
+          : await fetchCreditors(nextPage, currentQuery);
+
+      if (latestQueryKeyRef.current !== queryKey) {
+        return;
+      }
+
+      applyCreditorPage(response, 'append');
+      setPrefetchedPage(null);
+      void prefetchCreditors(response.hasNext, response.page, currentQuery);
+    } catch (error) {
+      if (latestQueryKeyRef.current !== queryKey) {
+        return;
+      }
+
+      if (error instanceof ApiRequestError && error.status === 401) {
+        handleAuthFailure();
+        return;
+      }
+
+      setNextPageError(getErrorMessage(error, 'Unable to load more creditors.'));
+    } finally {
+      if (latestQueryKeyRef.current !== queryKey) {
+        return;
+      }
+
+      setIsFetchingNextPage(false);
+    }
+  }, [
+    applyCreditorPage,
+    currentPage,
+    currentQuery,
+    fetchCreditors,
+    handleAuthFailure,
+    hasNext,
+    isFetchingNextPage,
+    isInitialLoading,
+    prefetchCreditors,
+    profile,
+  ]);
 
   useEffect(() => {
     const timer = window.setTimeout(() => {
@@ -202,16 +349,23 @@ export function CreditorManage() {
   }, [searchQuery]);
 
   useEffect(() => {
+    if (!profile) {
+      return;
+    }
+
     const queryKey = JSON.stringify(currentQuery);
     latestQueryKeyRef.current = queryKey;
+    prefetchRequestKeyRef.current = null;
     setItems([]);
-    setPage(0);
     setTotal(0);
-    setTotalPages(0);
+    setCurrentPage(1);
+    setHasNext(false);
+    setPrefetchedPage(null);
+    setIsPrefetchingNextPage(false);
     setNextPageError(null);
     scrollContainerRef.current?.scrollTo({ top: 0 });
     void loadCreditors(1, 'replace', currentQuery);
-  }, [currentQuery, loadCreditors]);
+  }, [currentQuery, loadCreditors, profile]);
 
   useEffect(() => {
     function handleClickOutside(event: MouseEvent) {
@@ -228,7 +382,7 @@ export function CreditorManage() {
     if (!scrollContainerRef.current || !loadMoreRef.current) {
       return;
     }
-    if (isInitialLoading || isFetchingNextPage || initialError || nextPageError || !hasMore) {
+    if (isInitialLoading || isFetchingNextPage || initialError || nextPageError || !hasNext) {
       return;
     }
 
@@ -238,31 +392,33 @@ export function CreditorManage() {
         if (!entry?.isIntersecting) {
           return;
         }
-        void loadCreditors(page + 1, 'append', currentQuery);
+        void loadNextPage();
       },
       {
         root: scrollContainerRef.current,
-        rootMargin: '0px 0px 320px 0px',
+        rootMargin: '0px 0px 640px 0px',
         threshold: 0.01,
       }
     );
 
     observer.observe(loadMoreRef.current);
     return () => observer.disconnect();
-  }, [currentQuery, hasMore, initialError, isFetchingNextPage, isInitialLoading, loadCreditors, nextPageError, page]);
+  }, [hasNext, initialError, isFetchingNextPage, isInitialLoading, loadNextPage, nextPageError]);
 
   useEffect(() => {
-    if (!selectedAutoRefreshOption.intervalMs) {
+    if (!selectedAutoRefreshOption.intervalMs || !profile) {
       return;
     }
 
     const timer = window.setInterval(() => {
       latestQueryKeyRef.current = JSON.stringify(currentQuery);
+      prefetchRequestKeyRef.current = null;
+      setPrefetchedPage(null);
       void loadCreditors(1, 'replace', currentQuery);
     }, selectedAutoRefreshOption.intervalMs);
 
     return () => window.clearInterval(timer);
-  }, [currentQuery, loadCreditors, selectedAutoRefreshOption.intervalMs]);
+  }, [currentQuery, loadCreditors, profile, selectedAutoRefreshOption.intervalMs]);
 
   const renderTable = () => {
     if (isInitialLoading) {
@@ -312,9 +468,7 @@ export function CreditorManage() {
                 <p className="mx-auto max-w-md text-sm leading-6 text-zinc-600">
                   {debouncedSearch
                     ? 'Try broadening your search or checking the creditor code and company name.'
-                    : company
-                      ? `${company} does not have any creditors yet. They will appear here when the list is ready.`
-                      : 'This company database is currently empty.'}
+                    : 'This company database is currently empty.'}
                 </p>
               </div>
               <div className="flex flex-wrap items-center justify-center gap-2">
@@ -490,15 +644,17 @@ export function CreditorManage() {
               <p className="text-red-600">{nextPageError}</p>
               <button
                 type="button"
-                onClick={() => void loadCreditors(page + 1, 'append', currentQuery)}
+                onClick={() => void loadNextPage()}
                 className="rounded-lg border border-zinc-200 bg-white px-3 py-1.5 text-[11px] font-semibold text-zinc-700 transition hover:border-zinc-300 hover:bg-zinc-50"
               >
                 Retry load more
               </button>
             </>
           )}
-          {!isFetchingNextPage && !nextPageError && hasMore && <p>Scroll down to load the next page.</p>}
-          {!hasMore && <p>No more creditors.</p>}
+          {!isFetchingNextPage && !nextPageError && hasNext && (
+            <p>{isPrefetchingNextPage ? 'Preparing the next page...' : 'Scroll down to load the next page.'}</p>
+          )}
+          {!hasNext && <p>No more creditors.</p>}
         </div>
       </>
     );
@@ -533,8 +689,8 @@ export function CreditorManage() {
         </div>
 
         <p className="text-xs text-zinc-500">
-          {company
-            ? `Loaded ${items.length} of ${total} creditors for ${company}${bookId ? ` | ${bookId}` : ''}.`
+          {total > 0
+            ? `Loaded ${items.length} of ${total} creditors.`
             : 'Manage your suppliers, track their status, and load more results as you scroll.'}
         </p>
       </div>
@@ -544,7 +700,7 @@ export function CreditorManage() {
           <Search size={14} className="absolute left-3 top-1/2 -translate-y-1/2 text-zinc-400 transition-colors group-focus-within:text-blue-500" />
           <input
             type="text"
-            placeholder="Search by code, company, phone, or agent..."
+            placeholder="Search creditor code, company, currency, type, phone, or agent..."
             value={searchQuery}
             onChange={(event) => setSearchQuery(event.target.value)}
             className="w-full rounded-md border border-zinc-200 bg-zinc-50 py-1.5 pl-9 pr-4 text-xs text-zinc-900 transition-all placeholder:text-zinc-400 focus:border-blue-500 focus:outline-none focus:ring-2 focus:ring-blue-500/10"
@@ -656,6 +812,8 @@ export function CreditorManage() {
             <span className="font-medium text-zinc-700">Search scope</span>
             <span className="rounded-full border border-zinc-200 bg-white px-2 py-0.5">Code</span>
             <span className="rounded-full border border-zinc-200 bg-white px-2 py-0.5">Company</span>
+            <span className="rounded-full border border-zinc-200 bg-white px-2 py-0.5">Currency</span>
+            <span className="rounded-full border border-zinc-200 bg-white px-2 py-0.5">Type</span>
             <span className="rounded-full border border-zinc-200 bg-white px-2 py-0.5">Phone</span>
             <span className="rounded-full border border-zinc-200 bg-white px-2 py-0.5">Agent</span>
           </div>

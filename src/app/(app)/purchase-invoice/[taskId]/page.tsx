@@ -1,7 +1,7 @@
 'use client';
 
 import React, { useState, useEffect } from 'react';
-import { Calendar as CalendarIcon, ChevronDown, Plus, Trash2, Waves, Loader2, Edit3, Download } from 'lucide-react';
+import { Calendar as CalendarIcon, ChevronDown, Plus, Trash2, Waves, Loader2, Edit3, Download, LayoutList } from 'lucide-react';
 import Link from 'next/link';
 import { useParams, useRouter } from 'next/navigation';
 import { toast } from 'sonner';
@@ -19,18 +19,21 @@ import { cn } from "@/lib/utils";
 import { safeExternalHref } from '@/lib/safe-url';
 import { Search, AlertTriangle } from 'lucide-react';
 
-import { waitForPurchaseInvoicePreview, type PreviewTaskStatus, PurchaseInvoicePreviewPayload, PurchaseInvoicePreviewDetail, getCreditorOptions, getAgentOptions, getStockOptions, type PurchaseInvoicePreviewMatches, type PreviewProposedNewItem } from '../../../../lib/purchase-invoice-create-api';
-import { getPurchaseInvoiceList } from '../../../../lib/purchase-invoice-api';
+import { waitForPurchaseInvoicePreview, type PreviewTaskStatus, PurchaseInvoicePreviewPayload, PurchaseInvoicePreviewDetail, getCreditorOptions, getAgentOptions, getStockOptions, getCreditorDetail, getStockDetail, type PurchaseInvoicePreviewMatches, type PreviewProposedNewItem } from '../../../../lib/purchase-invoice-create-api';
 import { type PurchaseInvoiceSubmitRequest } from '../../../../lib/purchase-invoice-submit-api';
+import { useAuth } from '../../../../components/AuthProvider';
 import { useSubmit } from '../../../../components/SubmitProvider';
 import { usePreviewProgress } from '../../../../components/PreviewProgressProvider';
+import { BatchStatusModal, type BatchStatusItem } from '../../../../components/BatchStatusModal';
 
-export default function PurchaseInvoiceTaskPage() {
+export default function PurchaseInvoiceTaskPage({ taskIdOverride, isGroup = false, groupId: groupIdProp }: { taskIdOverride?: string; isGroup?: boolean; groupId?: string } = {}) {
   const params = useParams();
   const router = useRouter();
-  const taskId = params.taskId as string;
+  const taskId = taskIdOverride ?? (params.taskId as string);
+  const groupId = groupIdProp || (typeof params.groupId === 'string' ? params.groupId : '');
 
-  const { startSubmit, isRunning: submitting } = useSubmit();
+  const { profile, accessToken } = useAuth();
+  const { startSubmit, isRunning: submitting, status: submitStatus } = useSubmit();
   const { startReanalyze, isRunning: reanalyzeRunning } = usePreviewProgress();
   const [loading, setLoading] = useState(true);
   const [loadError, setLoadError] = useState<string | null>(null);
@@ -39,13 +42,17 @@ export default function PurchaseInvoiceTaskPage() {
   const [editingItemIndex, setEditingItemIndex] = useState<number | null>(null);
   const [warnings, setWarnings] = useState<unknown[]>([]);
   const [taskStatus, setTaskStatus] = useState<PreviewTaskStatus | null>(null);
+  const [draftId, setDraftId] = useState<string>('');
   const [earlyDownloadUrl, setEarlyDownloadUrl] = useState<string | null>(null);
   const [earlyExternalLink, setEarlyExternalLink] = useState<string | null>(null);
   const [matches, setMatches] = useState<PurchaseInvoicePreviewMatches>({});
-  const [existingInvoiceNo, setExistingInvoiceNo] = useState<string | null>(null);
-  const [existingInvoiceCheckError, setExistingInvoiceCheckError] = useState<string | null>(null);
 
   const [createItemsEnabled, setCreateItemsEnabled] = useState<Record<number, boolean>>({});
+  const [isStatsModalOpen, setIsStatsModalOpen] = useState(false);
+  const [deletingItemIndex, setDeletingItemIndex] = useState<number | null>(null);
+  const [groupItems, setGroupItems] = useState<BatchStatusItem[]>([]);
+  const [groupAllDone, setGroupAllDone] = useState(false);
+  const [groupNow, setGroupNow] = useState(Date.now());
 
   // Search/Picker states
   const [creditorOptions, setCreditorOptions] = useState<any[]>([]);
@@ -64,6 +71,7 @@ export default function PurchaseInvoiceTaskPage() {
   const [isStockLoadingMore, setIsStockLoadingMore] = useState(false);
   
   const [isCreditorOpen, setIsCreditorOpen] = useState(false);
+  const [creditorCompanyName, setCreditorCompanyName] = useState<string>('');
   const [isAgentOpen, setIsAgentOpen] = useState(false);
   const [activeStockIdx, setActiveStockIdx] = useState<number | null>(null);
 
@@ -78,10 +86,13 @@ export default function PurchaseInvoiceTaskPage() {
     if (!taskId) return;
 
     let isMounted = true;
+    const controller = new AbortController();
     setLoading(true);
     setLoadError(null);
     setPayload(null);
     waitForPurchaseInvoicePreview(taskId, 'invoice', {
+      accessToken: accessToken ?? undefined,
+      signal: controller.signal,
       onProgress: (nextTask) => {
         if (!isMounted) {
           return;
@@ -97,8 +108,10 @@ export default function PurchaseInvoiceTaskPage() {
     })
       .then((res: any) => {
         if (isMounted) {
+          if (res.draftId) setDraftId(res.draftId);
           setPayload(res.payload);
-          setWarnings(res.warnings || []);
+          const resolvedWarnings = res.warnings || [];
+          setWarnings(resolvedWarnings);
           const previewMatches: PurchaseInvoicePreviewMatches = res.matches || {};
           setMatches(previewMatches);
 
@@ -144,48 +157,15 @@ export default function PurchaseInvoiceTaskPage() {
           setLoading(false);
         }
       });
-    return () => { isMounted = false; };
-  }, [router, taskId, loadNonce]);
+    return () => { isMounted = false; controller.abort(); };
+  }, [router, taskId, loadNonce, accessToken]);
 
   const retryLoad = () => {
     setLoadNonce((current) => current + 1);
   };
 
-  useEffect(() => {
-    const supplierInvoiceNo = payload?.supplierInvoiceNo?.trim() ?? '';
-    if (!supplierInvoiceNo) {
-      setExistingInvoiceNo(null);
-      setExistingInvoiceCheckError(null);
-      return;
-    }
+  // Duplicate invoice check removed — not needed at this stage.
 
-    let cancelled = false;
-    setExistingInvoiceNo(null);
-    setExistingInvoiceCheckError(null);
-
-    void (async () => {
-      try {
-        const list = await getPurchaseInvoiceList({
-          page: 1,
-          pageSize: 20,
-          search: supplierInvoiceNo,
-        });
-        if (cancelled) return;
-        const hit = (list.items ?? []).find((item) => item.supplierInvoiceNo === supplierInvoiceNo) ?? null;
-        setExistingInvoiceNo(hit?.invoiceNo ?? null);
-      } catch (error) {
-        if (cancelled) return;
-        const message = error instanceof Error && error.message ? error.message : 'Unable to verify submit status.';
-        setExistingInvoiceCheckError(message);
-      }
-    })();
-
-    return () => {
-      cancelled = true;
-    };
-  }, [payload?.supplierInvoiceNo]);
-
-  const alreadySubmitted = Boolean(existingInvoiceNo);
 
   const handleReanalyze = async () => {
     if (reanalyzeRunning) return;
@@ -220,20 +200,11 @@ export default function PurchaseInvoiceTaskPage() {
     const preload = async () => {
       try {
         setIsCreditorLoading(true);
-        const creditors = await getCreditorOptions({ page: 1, pageSize: 20 });
+        const creditors = await getCreditorOptions({ page: 1, pageSize: 20 }, accessToken ?? undefined);
         if (!cancelled) {
           setCreditorOptions(creditors.items || []);
           setCreditorPage(creditors.page ?? 1);
           setCreditorTotalPages(creditors.totalPages ?? 1);
-        }
-        // Opportunistic prefetch of next page for smooth scrolling.
-        if (!cancelled && (creditors.totalPages ?? 1) > 1) {
-          const creditors2 = await getCreditorOptions({ page: 2, pageSize: 20 });
-          if (!cancelled) {
-            setCreditorOptions((prev) => [...prev, ...(creditors2.items || [])]);
-            setCreditorPage(creditors2.page ?? 2);
-            setCreditorTotalPages(creditors2.totalPages ?? creditors.totalPages ?? 1);
-          }
         }
       } catch (error) {
         // keep silent: user can still search/open dropdown which will retry
@@ -244,19 +215,11 @@ export default function PurchaseInvoiceTaskPage() {
 
       try {
         setIsAgentLoading(true);
-        const agents = await getAgentOptions({ page: 1, pageSize: 20 });
+        const agents = await getAgentOptions({ page: 1, pageSize: 20 }, accessToken ?? undefined);
         if (!cancelled) {
           setAgentOptions(agents.items || []);
           setAgentPage(agents.page ?? 1);
           setAgentTotalPages(agents.totalPages ?? 1);
-        }
-        if (!cancelled && (agents.totalPages ?? 1) > 1) {
-          const agents2 = await getAgentOptions({ page: 2, pageSize: 20 });
-          if (!cancelled) {
-            setAgentOptions((prev) => [...prev, ...(agents2.items || [])]);
-            setAgentPage(agents2.page ?? 2);
-            setAgentTotalPages(agents2.totalPages ?? agents.totalPages ?? 1);
-          }
         }
       } catch (error) {
         console.error('Agent preload error:', error);
@@ -269,7 +232,132 @@ export default function PurchaseInvoiceTaskPage() {
     return () => {
       cancelled = true;
     };
-  }, []);
+  }, [accessToken]);
+
+  // Fetch group items for the stats modal when opened on a batch item page.
+  // Uses SSE for real-time updates with a polling fallback.
+  useEffect(() => {
+    if (!isGroup || !groupId || !isStatsModalOpen) return;
+
+    const controller = new AbortController();
+    const { signal } = controller;
+
+    const TERMINAL = new Set(['succeeded', 'failed', 'canceled', 'cancelled']);
+
+    const mapPhase = (s: string): BatchStatusItem['phase'] => {
+      switch (s) {
+        case 'queued': case 'uploaded': return 'queued';
+        case 'ocr_started': case 'ocr_completed': return 'ocr_processing';
+        case 'draft_ready': case 'analyzing': return 'analyzing';
+        case 'completed': return 'succeeded';
+        case 'failed': return 'failed';
+        default: return 'queued';
+      }
+    };
+    const parseMs = (v?: string | null) => { if (!v) return null; const ms = Date.parse(v); return isNaN(ms) ? null : ms; };
+
+    type GroupData = {
+      status?: string;
+      items?: Array<{
+        taskId?: string; itemId?: string; fileName?: string; size?: number;
+        status?: string; warningCount?: number; downloadLink?: string;
+        startedAt?: string; completedAt?: string;
+      }>;
+    };
+
+    const applyGroupData = (data: GroupData): boolean => {
+      const mapped: BatchStatusItem[] = (data.items ?? []).map((it) => ({
+        id: it.taskId ?? it.itemId ?? '',
+        fileName: it.fileName ?? it.taskId ?? '',
+        fileSize: it.size ?? 0,
+        phase: mapPhase(it.status ?? ''),
+        previewTaskId: it.taskId ?? it.itemId ?? null,
+        startedAt: parseMs(it.startedAt),
+        completedAt: parseMs(it.completedAt),
+        error: null,
+        warningCount: it.warningCount ?? 0,
+        downloadUrl: it.downloadLink ?? undefined,
+      }));
+      if (mapped.length > 0) { setGroupItems(mapped); setGroupNow(Date.now()); }
+      const done = data.status === 'completed' || data.status === 'failed' || data.status === 'partial_failed'
+        || (mapped.length > 0 && mapped.every((i) => TERMINAL.has(i.phase)));
+      if (done) setGroupAllDone(true);
+      return done;
+    };
+
+    let pollTimer: ReturnType<typeof setTimeout> | null = null;
+    const startPolling = () => {
+      const poll = async () => {
+        if (signal.aborted) return;
+        try {
+          const pollHeaders: Record<string, string> = {};
+          if (accessToken) pollHeaders['Authorization'] = `Bearer ${accessToken}`;
+          const res = await fetch(`/api/purchase-invoice/tasks/group/${groupId}`, {
+            headers: pollHeaders, cache: 'no-store', signal,
+          });
+          if (!res.ok || signal.aborted) return;
+          const data = (await res.json()) as GroupData;
+          const done = applyGroupData(data);
+          if (!done && !signal.aborted) pollTimer = setTimeout(poll, 2500);
+        } catch {
+          if (!signal.aborted) pollTimer = setTimeout(poll, 3000);
+        }
+      };
+      pollTimer = setTimeout(poll, 500);
+    };
+
+    void (async () => {
+      try {
+        const sseHeaders: Record<string, string> = { Accept: 'text/event-stream' };
+        if (accessToken) sseHeaders['Authorization'] = `Bearer ${accessToken}`;
+        const res = await fetch(`/api/purchase-invoice/tasks/group/${groupId}/stream`, {
+          headers: sseHeaders, signal,
+        });
+        if (!res.ok || !res.body) { startPolling(); return; }
+
+        const reader = res.body.getReader();
+        const decoder = new TextDecoder();
+        let buf = '';
+        try {
+          while (true) {
+            const { done, value } = await reader.read();
+            if (value?.length) {
+              buf += decoder.decode(value, { stream: !done });
+            }
+            const blocks = buf.split('\n\n');
+            buf = done ? '' : (blocks.pop() ?? '');
+            for (const block of blocks) {
+              if (!block.trim()) continue;
+              let dataStr = '';
+              for (const line of block.split('\n')) {
+                if (line.startsWith('data:')) dataStr += line.slice(5).trim();
+              }
+              if (!dataStr) continue;
+              try {
+                const parsed = JSON.parse(dataStr) as GroupData;
+                const isDone = applyGroupData(parsed);
+                if (isDone) return;
+              } catch { /* skip malformed event */ }
+            }
+            if (done) break;
+          }
+        } finally {
+          reader.cancel().catch(() => {});
+        }
+        // SSE ended without reaching terminal state — fall back to polling
+        if (!signal.aborted) startPolling();
+      } catch {
+        if (!signal.aborted) startPolling();
+      }
+    })();
+
+    const tick = window.setInterval(() => { if (!signal.aborted) setGroupNow(Date.now()); }, 1000);
+    return () => {
+      controller.abort();
+      window.clearInterval(tick);
+      if (pollTimer) clearTimeout(pollTimer);
+    };
+  }, [isGroup, groupId, isStatsModalOpen, accessToken]);
 
   useEffect(() => {
     if (!isCreditorOpen) {
@@ -284,7 +372,7 @@ export default function PurchaseInvoiceTaskPage() {
       setIsCreditorLoading(true);
       setIsCreditorLoadingMore(false);
       try {
-        const res = await getCreditorOptions({ search: creditorSearch, page: 1, pageSize: 20 });
+        const res = await getCreditorOptions({ search: creditorSearch, page: 1, pageSize: 20 }, accessToken ?? undefined);
         setCreditorOptions(res.items || []);
         setCreditorPage(res.page ?? 1);
         setCreditorTotalPages(res.totalPages ?? 1);
@@ -310,7 +398,7 @@ export default function PurchaseInvoiceTaskPage() {
       setIsAgentLoading(true);
       setIsAgentLoadingMore(false);
       try {
-        const res = await getAgentOptions({ search: agentSearch, page: 1, pageSize: 20 });
+        const res = await getAgentOptions({ search: agentSearch, page: 1, pageSize: 20 }, accessToken ?? undefined);
         setAgentOptions(res.items || []);
         setAgentPage(res.page ?? 1);
         setAgentTotalPages(res.totalPages ?? 1);
@@ -333,7 +421,7 @@ export default function PurchaseInvoiceTaskPage() {
       setIsStockLoading(true);
       setIsStockLoadingMore(false);
       try {
-        const res = await getStockOptions({ search: stockSearch, page: 1, pageSize: 20 });
+        const res = await getStockOptions({ search: stockSearch, page: 1, pageSize: 20 }, accessToken ?? undefined);
         setStockOptions(res.items || []);
         setStockPage(res.page ?? 1);
         setStockTotalPages(res.totalPages ?? 1);
@@ -355,8 +443,11 @@ export default function PurchaseInvoiceTaskPage() {
     setIsCreditorLoadingMore(true);
     try {
       const nextPage = creditorPage + 1;
-      const res = await getCreditorOptions({ search: creditorSearch, page: nextPage, pageSize: 20 });
-      setCreditorOptions((prev) => [...prev, ...(res.items || [])]);
+      const res = await getCreditorOptions({ search: creditorSearch, page: nextPage, pageSize: 20 }, accessToken ?? undefined);
+      setCreditorOptions((prev) => {
+        const seen = new Set(prev.map((o) => o.accNo));
+        return [...prev, ...(res.items || []).filter((o) => !seen.has(o.accNo))];
+      });
       setCreditorPage(res.page ?? nextPage);
       setCreditorTotalPages(res.totalPages ?? creditorTotalPages);
     } catch (error) {
@@ -374,7 +465,7 @@ export default function PurchaseInvoiceTaskPage() {
     setIsAgentLoadingMore(true);
     try {
       const nextPage = agentPage + 1;
-      const res = await getAgentOptions({ search: agentSearch, page: nextPage, pageSize: 20 });
+      const res = await getAgentOptions({ search: agentSearch, page: nextPage, pageSize: 20 }, accessToken ?? undefined);
       setAgentOptions((prev) => [...prev, ...(res.items || [])]);
       setAgentPage(res.page ?? nextPage);
       setAgentTotalPages(res.totalPages ?? agentTotalPages);
@@ -393,7 +484,7 @@ export default function PurchaseInvoiceTaskPage() {
     setIsStockLoadingMore(true);
     try {
       const nextPage = stockPage + 1;
-      const res = await getStockOptions({ search: stockSearch, page: nextPage, pageSize: 20 });
+      const res = await getStockOptions({ search: stockSearch, page: nextPage, pageSize: 20 }, accessToken ?? undefined);
       setStockOptions((prev) => [...prev, ...(res.items || [])]);
       setStockPage(res.page ?? nextPage);
       setStockTotalPages(res.totalPages ?? stockTotalPages);
@@ -477,9 +568,16 @@ export default function PurchaseInvoiceTaskPage() {
     );
   };
 
+  const hasAnyWarningForLine = (line: number) => {
+    return warnings.some(w => isWarningObject(w) && (w as any).line === line);
+  };
+
   const getBorderClass = (code: string, line?: number) => {
-    return checkWarning(code, line) 
-      ? 'border-yellow-400 bg-yellow-50/50 ring-2 ring-yellow-400/20' 
+    const hasWarning = line !== undefined && line > 0
+      ? hasAnyWarningForLine(line)
+      : checkWarning(code, line);
+    return hasWarning
+      ? 'border-yellow-400 bg-yellow-50/50 ring-2 ring-yellow-400/20'
       : 'border-gray-200 bg-white focus:border-gray-300 focus:ring-1 focus:ring-gray-300';
   };
 
@@ -510,10 +608,10 @@ export default function PurchaseInvoiceTaskPage() {
     });
 
     if (field === 'itemCode' || field === 'description') {
-       removeWarning(['item_needs_review', 'item_not_matched'], index);
+       removeWarning(['item_needs_review', 'item_not_matched'], index + 1);
     }
     if (field === 'taxCode') {
-       removeWarning(['tax_code_not_confirmed'], index);
+       removeWarning(['tax_code_not_confirmed'], index + 1);
     }
   };
 
@@ -587,75 +685,58 @@ export default function PurchaseInvoiceTaskPage() {
     });
   };
 
-  const handleSubmit = async () => {
-    if (!payload) return;
-    if (alreadySubmitted) {
-      toast.message('This invoice appears to have been submitted already. Returning to list.');
-      router.push('/purchase-invoice');
-      return;
-    }
+  const buildSubmitRequest = (): PurchaseInvoiceSubmitRequest | null => {
+    if (!payload || !draftId) return null;
 
-    // Build createMissing from toggle states
-    const createMissing: PurchaseInvoiceSubmitRequest['createMissing'] = {};
-
-    // Items
-    const missingItems: NonNullable<NonNullable<PurchaseInvoiceSubmitRequest['createMissing']>['items']> = [];
-    payload.details.forEach((d, i) => {
-      if (createItemsEnabled[i] && matches.items?.[i]?.proposedNewItem) {
-        const proposed = (matches.items?.[i]?.proposedNewItem || {}) as PreviewProposedNewItem;
-        missingItems.push({
-          line: i + 1, // 1-based
-          enabled: true,
-          payload: {
-            itemCode: String(d.itemCode || proposed.itemCodeSuggestion || ''),
-            description: String(d.description || proposed.description || ''),
-            itemGroup: String(d.itemGroup || proposed.itemGroup || ''),
-            itemType: String(proposed.itemType || ''),
-            salesUom: String(proposed.salesUom || proposed.baseUom || d.uom || 'UNIT'),
-            purchaseUom: String(proposed.purchaseUom || proposed.baseUom || d.uom || 'UNIT'),
-            reportUom: String(proposed.reportUom || proposed.baseUom || d.uom || 'UNIT'),
-            uomConfirmed: true,
-            stockControl: proposed.stockControl ?? false,
-            hasSerialNo: proposed.hasSerialNo ?? false,
-            hasBatchNo: proposed.hasBatchNo ?? false,
-            isActive: proposed.active ?? true,
-            taxCode: String(proposed.taxCode || ''),
-            purchaseTaxCode: String(proposed.purchaseTaxCode || d.taxCode || ''),
-          },
-        });
-      }
+    const details = payload.details.map((d: any, i: number) => {
+      const isNewItem = !!(createItemsEnabled[i] && matches.items?.[i]?.proposedNewItem);
+      const proposed = isNewItem ? ((matches.items?.[i]?.proposedNewItem || {}) as PreviewProposedNewItem) : null;
+      return {
+        lineNo: i + 1,
+        itemCode: d.itemCode || '',
+        accNo: d.accNo || '',
+        qty: d.qty,
+        uom: d.uom || '',
+        unitPrice: d.unitPrice,
+        amount: d.amount,
+        description: d.description || '',
+        desc2: d.desc2 || '',
+        taxCode: d.taxCode || '',
+        itemGroup: d.itemGroup || '',
+        isNewItem,
+        autoCreateStock: isNewItem,
+        ...(isNewItem && proposed ? { stockProposal: proposed as unknown as Record<string, unknown> } : {}),
+      };
     });
-    createMissing.items = missingItems;
 
-    const req: PurchaseInvoiceSubmitRequest = {
-      requestId: `submit-${Date.now()}`,
-      previewTaskId: taskId,
-      payload: {
+    return {
+      draftId,
+      accessToken: accessToken ?? undefined,
+      header: {
         creditorCode: payload.creditorCode,
         purchaseAgent: payload.purchaseAgent || '',
         supplierInvoiceNo: payload.supplierInvoiceNo,
         docDate: payload.docDate,
-        currencyCode: payload.currencyCode,
-        currencyRate: payload.currencyRate,
         displayTerm: payload.displayTerm,
-        purchaseLocation: payload.purchaseLocation,
-        description: payload.description,
-        details: payload.details.map((d: any) => ({
-          itemCode: d.itemCode,
-          description: d.description || '',
-          desc2: d.desc2 || '',
-          qty: d.qty,
-          unitPrice: d.unitPrice,
-          amount: d.amount,
-          uom: d.uom,
-          taxCode: d.taxCode || '',
-          accNo: d.accNo,
-          itemGroup: d.itemGroup || '',
-        })),
+        location: payload.purchaseLocation || 'HQ',
+        currency: payload.currencyCode,
+        currencyRate: payload.currencyRate,
+        description: payload.description || 'PURCHASE INVOICE',
       },
-      createMissing,
+      details,
     };
+  };
+
+  const handleSubmit = async () => {
+    const req = buildSubmitRequest();
+    if (!req) return;
     await startSubmit(req);
+  };
+
+  const handleSubmitSilent = async () => {
+    const req = buildSubmitRequest();
+    if (!req) return;
+    await startSubmit(req, { silent: true });
   };
 
   const formatNumber = (num: number | string) => {
@@ -669,19 +750,21 @@ export default function PurchaseInvoiceTaskPage() {
   const downloadOriginalHref = safeExternalHref(earlyDownloadUrl || earlyExternalLink || payload?.externalLink || null);
 
   const statusLabel =
-    taskStatus === 'queued'
-      ? 'Queued'
-      : taskStatus === 'ocr_processing'
-        ? 'Reading'
-        : taskStatus === 'analyzing'
-          ? 'Drafting'
-          : taskStatus === 'canceled'
-            ? 'Cancelled'
-            : taskStatus === 'failed'
-              ? 'Failed'
-              : taskStatus === 'succeeded'
-                ? 'Ready'
-                : null;
+    submitStatus === 'completed'
+      ? 'Submitted'
+      : taskStatus === 'queued'
+        ? 'Queued'
+        : taskStatus === 'ocr_processing'
+          ? 'Reading'
+          : taskStatus === 'analyzing'
+            ? 'Drafting'
+            : taskStatus === 'canceled'
+              ? 'Cancelled'
+              : taskStatus === 'failed'
+                ? 'Failed'
+                : taskStatus === 'succeeded'
+                  ? 'Ready'
+                  : null;
 
   if (loading) {
     return (
@@ -696,7 +779,7 @@ export default function PurchaseInvoiceTaskPage() {
             ) : null}
           </div>
           <div className="flex items-center gap-3">
-            <Link href="/purchase-invoice" className="rounded-xl px-4 py-2 text-sm font-medium text-zinc-600 transition hover:bg-zinc-100 hover:text-zinc-900">Back</Link>
+            <Link href={isGroup && groupId ? `/purchase-invoice/batch/${groupId}` : '/purchase-invoice'} className="rounded-xl px-4 py-2 text-sm font-medium text-zinc-600 transition hover:bg-zinc-100 hover:text-zinc-900">Back</Link>
             {downloadOriginalHref ? (
               <div className="flex items-center gap-2">
                 <a
@@ -708,16 +791,18 @@ export default function PurchaseInvoiceTaskPage() {
                   <Download className="h-4 w-4" />
                   Download Original
                 </a>
-                <button
-                  type="button"
-                  onClick={handleReanalyze}
-                  disabled={reanalyzeRunning || submitting}
-                  className="inline-flex items-center gap-2 rounded-xl border border-zinc-200 bg-white px-4 py-2 text-sm font-medium text-zinc-900 transition hover:bg-zinc-50 disabled:opacity-50"
-                  title="Re-run OCR and AI extraction for this invoice"
-                >
-                  {reanalyzeRunning ? <Loader2 className="h-4 w-4 animate-spin" /> : <RefreshCcw className="h-4 w-4" />}
-                  Reanalyze
-                </button>
+                {submitStatus !== 'completed' && (
+                  <button
+                    type="button"
+                    onClick={handleReanalyze}
+                    disabled={reanalyzeRunning || submitting}
+                    className="inline-flex items-center gap-2 rounded-xl border border-zinc-200 bg-white px-4 py-2 text-sm font-medium text-zinc-900 transition hover:bg-zinc-50 disabled:opacity-50"
+                    title="Re-run OCR and AI extraction for this invoice"
+                  >
+                    {reanalyzeRunning ? <Loader2 className="h-4 w-4 animate-spin" /> : <RefreshCcw className="h-4 w-4" />}
+                    Reanalyze
+                  </button>
+                )}
               </div>
             ) : null}
           </div>
@@ -741,7 +826,7 @@ export default function PurchaseInvoiceTaskPage() {
           </div>
           <div className="flex items-center gap-3">
             <Link
-              href="/purchase-invoice"
+              href={isGroup && groupId ? `/purchase-invoice/batch/${groupId}` : '/purchase-invoice'}
               className="rounded-xl px-4 py-2 text-sm font-medium text-zinc-600 transition hover:bg-zinc-100 hover:text-zinc-900"
             >
               Back
@@ -796,18 +881,8 @@ export default function PurchaseInvoiceTaskPage() {
         <div className="flex items-center gap-3">
           <h1 className="text-xl font-semibold tracking-tight text-zinc-950">Purchase invoice review draft</h1>
           {statusLabel ? (
-            <span className="inline-flex items-center rounded-full border border-zinc-200 bg-zinc-50 px-2.5 py-1 text-[11px] font-semibold text-zinc-600">
+            <span className={`inline-flex items-center rounded-full border px-2.5 py-1 text-[11px] font-semibold ${submitStatus === 'completed' ? 'border-emerald-200 bg-emerald-50 text-emerald-700' : 'border-zinc-200 bg-zinc-50 text-zinc-600'}`}>
               {statusLabel}
-            </span>
-          ) : null}
-          {existingInvoiceNo ? (
-            <span className="inline-flex items-center rounded-full border border-emerald-200 bg-emerald-50 px-2.5 py-1 text-[11px] font-semibold text-emerald-700">
-              Submitted: {existingInvoiceNo}
-            </span>
-          ) : null}
-          {existingInvoiceCheckError ? (
-            <span className="inline-flex items-center rounded-full border border-amber-200 bg-amber-50 px-2.5 py-1 text-[11px] font-semibold text-amber-700">
-              Status check unavailable
             </span>
           ) : null}
         </div>
@@ -830,27 +905,41 @@ export default function PurchaseInvoiceTaskPage() {
                 <Download className="h-4 w-4" />
                 Download Original
               </a>
-              <button
-                type="button"
-                onClick={handleReanalyze}
-                disabled={reanalyzeRunning || submitting}
-                className="inline-flex items-center gap-2 rounded-xl border border-zinc-200 bg-white px-4 py-2 text-sm font-medium text-zinc-900 transition hover:bg-zinc-50 disabled:opacity-50"
-                title="Re-run OCR and AI extraction for this invoice"
-              >
-                {reanalyzeRunning ? <Loader2 className="h-4 w-4 animate-spin" /> : <RefreshCcw className="h-4 w-4" />}
-                Reanalyze
-              </button>
+              {submitStatus !== 'completed' && (
+                <button
+                  type="button"
+                  onClick={handleReanalyze}
+                  disabled={reanalyzeRunning || submitting}
+                  className="inline-flex items-center gap-2 rounded-xl border border-zinc-200 bg-white px-4 py-2 text-sm font-medium text-zinc-900 transition hover:bg-zinc-50 disabled:opacity-50"
+                  title="Re-run OCR and AI extraction for this invoice"
+                >
+                  {reanalyzeRunning ? <Loader2 className="h-4 w-4 animate-spin" /> : <RefreshCcw className="h-4 w-4" />}
+                  Reanalyze
+                </button>
+              )}
             </div>
           )}
-          <button
-            type="button"
-            onClick={handleSubmit}
-            disabled={submitting || alreadySubmitted}
-            className="inline-flex items-center gap-2 rounded-xl bg-zinc-950 px-4 py-2 text-sm font-semibold text-white transition hover:bg-zinc-800 disabled:opacity-50"
-          >
-            {submitting && <Loader2 className="h-4 w-4 animate-spin" />}
-            {alreadySubmitted ? 'Already Submitted' : 'Submit Purchase Invoice'}
-          </button>
+          {isGroup && (
+            <button
+              type="button"
+              onClick={() => setIsStatsModalOpen(true)}
+              className="inline-flex items-center gap-2 rounded-xl border border-zinc-200 bg-white px-4 py-2 text-sm font-medium text-zinc-900 transition hover:bg-zinc-50"
+            >
+              <LayoutList className="h-4 w-4" />
+              Stats
+            </button>
+          )}
+          {submitStatus !== 'completed' && (
+            <button
+              type="button"
+              onClick={handleSubmit}
+              disabled={submitting}
+              className="inline-flex items-center gap-2 rounded-xl bg-zinc-950 px-4 py-2 text-sm font-semibold text-white transition hover:bg-zinc-800 disabled:opacity-50"
+            >
+              {submitting && <Loader2 className="h-4 w-4 animate-spin" />}
+              Submit Purchase Invoice
+            </button>
+          )}
         </div>
       </div>
 
@@ -878,7 +967,16 @@ export default function PurchaseInvoiceTaskPage() {
                         role="combobox"
                         className={cn("w-full h-[42px] flex items-center justify-between border rounded-md px-3 py-2 text-sm transition-all duration-200 bg-white outline-none", getBorderClass('creditor_', -1))}
                       >
-                        <span className="truncate">{payload.creditorCode || "Select Creditor"}</span>
+                        {payload.creditorCode ? (
+                          <span className="flex flex-col items-start min-w-0">
+                            <span className="font-medium text-sm leading-tight">{payload.creditorCode}</span>
+                            {creditorCompanyName && (
+                              <span className="text-xs text-gray-400 truncate w-full leading-tight">{creditorCompanyName}</span>
+                            )}
+                          </span>
+                        ) : (
+                          <span className="text-gray-400">Select Creditor</span>
+                        )}
                         <ChevronDown className="ml-2 h-4 w-4 shrink-0 opacity-50" />
                       </button>
                     </PopoverTrigger>
@@ -905,6 +1003,7 @@ export default function PurchaseInvoiceTaskPage() {
                               value="none"
                               onSelect={() => {
                                 handleFieldChange('creditorCode', "");
+                                setCreditorCompanyName('');
                                 setIsCreditorOpen(false);
                               }}
                             >
@@ -918,7 +1017,30 @@ export default function PurchaseInvoiceTaskPage() {
                                 value={opt.accNo}
                                 onSelect={() => {
                                   handleFieldChange('creditorCode', opt.accNo);
+                                  setCreditorCompanyName(opt.companyName ?? '');
                                   setIsCreditorOpen(false);
+                                  // Fetch full creditor detail to update address, agent, currency, term
+                                  void getCreditorDetail(opt.accNo, accessToken ?? undefined).then((detail) => {
+                                    if (!detail) return;
+                                    // Build address from address1-4 fields
+                                    const addrParts = [detail.address1, detail.address2, detail.address3, detail.address4]
+                                      .map((s) => s?.trim())
+                                      .filter(Boolean) as string[];
+                                    const addrLines = addrParts.length > 0
+                                      ? addrParts
+                                      : detail.creditorAddressLines ?? (detail.creditorAddress ? [detail.creditorAddress] : undefined);
+                                    setPayload((prev) => {
+                                      if (!prev) return prev;
+                                      return {
+                                        ...prev,
+                                        purchaseAgent: detail.purchaseAgent ?? prev.purchaseAgent,
+                                        displayTerm: detail.displayTerm ?? prev.displayTerm,
+                                        currencyCode: detail.currencyCode ?? detail.currency ?? prev.currencyCode,
+                                        currencyRate: detail.currencyRate ?? prev.currencyRate,
+                                        creditorAddressLines: addrLines ?? [],
+                                      };
+                                    });
+                                  });
                                 }}
                               >
                                 <div className="flex flex-col">
@@ -951,78 +1073,9 @@ export default function PurchaseInvoiceTaskPage() {
                     <FieldWarning code="agent_not_matched" customMsg="No matching agent found" />
                     <FieldWarning code="agent_needs_review" customMsg="Please review agent match" />
                   </label>
-                  <Popover open={isAgentOpen} onOpenChange={setIsAgentOpen}>
-                    <PopoverTrigger asChild>
-                      <button
-                        type="button"
-                        role="combobox"
-                        className={cn("w-full h-[42px] flex items-center justify-between border rounded-md px-3 py-2 text-sm transition-all duration-200 bg-white outline-none", getBorderClass('agent_', -1))}
-                      >
-                        <span className="truncate">{payload.purchaseAgent || "Select Agent"}</span>
-                        <ChevronDown className="ml-2 h-4 w-4 shrink-0 opacity-50" />
-                      </button>
-                    </PopoverTrigger>
-                    <PopoverContent className="w-[300px] p-0 bg-white shadow-xl border border-gray-100" align="start">
-                      <Command shouldFilter={false}>
-                        <CommandInput 
-                          placeholder="Search agent..." 
-                          value={agentSearch}
-                          onValueChange={setAgentSearch}
-                        />
-                        <CommandList
-                          className="max-h-72 overflow-auto"
-                          onScroll={(event) => {
-                            const target = event.currentTarget;
-                            if (target.scrollTop + target.clientHeight >= target.scrollHeight - 32) {
-                              void loadMoreAgents();
-                            }
-                          }}
-                        >
-                          {isAgentLoading && <div className="p-4 text-xs text-center text-gray-500">Loading...</div>}
-                          <CommandEmpty>No results found.</CommandEmpty>
-                          <CommandGroup>
-                            <CommandItem
-                              value="none"
-                              onSelect={() => {
-                                handleFieldChange('purchaseAgent', "");
-                                setIsAgentOpen(false);
-                              }}
-                            >
-                              <div className="flex flex-col">
-                                <span className="font-medium text-red-500">None</span>
-                              </div>
-                            </CommandItem>
-                            {agentOptions.map((opt) => (
-                              <CommandItem
-                                key={opt.code}
-                                value={opt.code}
-                                onSelect={() => {
-                                  handleFieldChange('purchaseAgent', opt.code);
-                                  setIsAgentOpen(false);
-                                }}
-                              >
-                                <div className="flex flex-col">
-                                  <span className="font-semibold">{opt.code}</span>
-                                  <span className="text-xs text-gray-500">{opt.description}</span>
-                                </div>
-                              </CommandItem>
-                            ))}
-                            {payload.purchaseAgent && !agentSearch && !agentOptions.find(o => o.code === payload.purchaseAgent) && (
-                              <CommandItem
-                                value={payload.purchaseAgent}
-                                onSelect={() => setIsAgentOpen(false)}
-                              >
-                                {payload.purchaseAgent} (Current)
-                              </CommandItem>
-                            )}
-                          </CommandGroup>
-                          {isAgentLoadingMore ? (
-                            <div className="p-3 text-xs text-center text-gray-500">Loading more...</div>
-                          ) : null}
-                        </CommandList>
-                      </Command>
-                    </PopoverContent>
-                  </Popover>
+                  <div className="w-full h-[42px] flex items-center border rounded-md px-3 py-2 text-sm bg-zinc-50 text-zinc-600 select-none">
+                    {payload.purchaseAgent || ''}
+                  </div>
                 </div>
                 {/* Supplier Invoice No */}
                 <div>
@@ -1081,23 +1134,17 @@ export default function PurchaseInvoiceTaskPage() {
                     Display Term
                     <FieldWarning code="display_term_not_confirmed" customMsg="Review term" />
                   </label>
-                  <input
-                    type="text"
-                    value={payload.displayTerm}
-                    onChange={(e) => handleFieldChange('displayTerm', e.target.value)}
-                    className={cn("w-full rounded-lg px-3 py-2.5 text-sm transition-colors border outline-none", getBorderClass('display_term_not_confirmed'))}
-                  />
+                  <div className="w-full h-[42px] flex items-center rounded-lg px-3 py-2.5 text-sm border bg-zinc-50 text-zinc-600">
+                    {payload.displayTerm || ''}
+                  </div>
                 </div>
                 <div>
                   <label className="block text-sm font-medium text-gray-700 mb-1.5">
                     Location
                   </label>
-                  <input
-                    type="text"
-                    value={payload.purchaseLocation}
-                    onChange={(e) => handleFieldChange('purchaseLocation', e.target.value)}
-                    className={cn("w-full h-[42px] px-3 py-2.5 text-sm transition-all duration-200 border outline-none rounded-lg", getBorderClass('purchase_location', -1))}
-                  />
+                  <div className="w-full h-[42px] flex items-center rounded-lg px-3 py-2.5 text-sm border bg-zinc-50 text-zinc-600">
+                    {payload.purchaseLocation || ''}
+                  </div>
                 </div>
               </div>
 
@@ -1108,24 +1155,18 @@ export default function PurchaseInvoiceTaskPage() {
                     Currency
                     <FieldWarning code="currency_not_confirmed" customMsg="Review currency" />
                   </label>
-                  <input
-                    type="text"
-                    value={payload.currencyCode}
-                    onChange={(e) => handleFieldChange('currencyCode', e.target.value)}
-                    className={cn("w-full rounded-lg px-3 py-2.5 text-sm transition-colors border outline-none", getBorderClass('currency_not_confirmed'))}
-                  />
+                  <div className="w-full h-[42px] flex items-center rounded-lg px-3 py-2.5 text-sm border bg-zinc-50 text-zinc-600">
+                    {payload.currencyCode || ''}
+                  </div>
                 </div>
                 {/* Currency Rate */}
                 <div>
                   <label className="block text-sm font-medium text-gray-700 mb-1.5">
                     Currency Rate
                   </label>
-                  <input
-                    type="text"
-                    value={payload.currencyRate}
-                    onChange={(e) => handleFieldChange('currencyRate', parseNumber(e.target.value))}
-                    className={cn("w-full h-[42px] px-3 py-2.5 text-sm transition-all duration-200 border outline-none rounded-lg", getBorderClass('currency_rate', -1))}
-                  />
+                  <div className="w-full h-[42px] flex items-center rounded-lg px-3 py-2.5 text-sm border bg-zinc-50 text-zinc-600">
+                    {String(payload.currencyRate) || ''}
+                  </div>
                 </div>
               </div>
 
@@ -1133,11 +1174,11 @@ export default function PurchaseInvoiceTaskPage() {
                 <label className="block text-sm font-medium text-gray-700 mb-1.5">
                   Description
                 </label>
-                 <input
+                <input
                   type="text"
                   value={payload.description}
                   onChange={(e) => handleFieldChange('description', e.target.value)}
-                  className={cn("w-full px-3 py-2.5 text-sm transition-all duration-200 border outline-none rounded-lg", getBorderClass('description', -1))}
+                  className="w-full h-[42px] rounded-lg px-3 py-2.5 text-sm border border-gray-200 bg-white outline-none focus:border-gray-300 focus:ring-1 focus:ring-gray-300"
                 />
               </div>
 
@@ -1159,11 +1200,43 @@ export default function PurchaseInvoiceTaskPage() {
 
                 <div className="space-y-3">
                   {payload.details.map((item, index) => (
-                    <div key={index} className="flex flex-col gap-1">
+                    <div key={index} className={cn(
+                      "flex flex-col gap-1 rounded-lg p-2 -mx-2 transition-all duration-200",
+                      hasAnyWarningForLine(index + 1)
+                        ? "border border-yellow-400 bg-yellow-50/30 ring-2 ring-yellow-400/10"
+                        : ""
+                    )}>
                       <div className="flex flex-wrap gap-2 mb-1 items-center">
-                        <FieldWarning code="item_not_matched" line={index + 1} customMsg="Item not matched" />
-                        <FieldWarning code="item_needs_review" line={index + 1} customMsg="Please review item match" />
-                        <FieldWarning code="tax_code_not_confirmed" line={index + 1} customMsg="Review Tax Code" />
+                        {/* Show single badge for all warnings on this line */}
+                        {(() => {
+                          const lineWarnings = warnings
+                            .filter((w) => isWarningObject(w) && (w as any).line === index + 1)
+                            .map((w) => w as { code: string; message?: string });
+                          if (lineWarnings.length === 0) return null;
+                          return (
+                            <Tooltip>
+                              <TooltipTrigger asChild>
+                                <Badge
+                                  variant="outline"
+                                  className="cursor-help bg-yellow-100 text-yellow-700 border-yellow-200 hover:bg-yellow-200 transition-colors uppercase tracking-wider text-[10px] py-0 px-1.5 h-5 flex items-center gap-1"
+                                >
+                                  <AlertTriangle className="w-3 h-3 text-yellow-600" />
+                                  {lineWarnings.length > 1 ? `${lineWarnings.length} WARNINGS` : 'WARNING'}
+                                </Badge>
+                              </TooltipTrigger>
+                              <TooltipContent className="bg-zinc-900 border-zinc-800 text-white p-2 text-xs shadow-xl max-w-xs">
+                                <ul className="space-y-1">
+                                  {lineWarnings.map((wo, wi) => (
+                                    <li key={wi} className="flex items-start gap-1.5">
+                                      <AlertTriangle className="w-3 h-3 text-yellow-400 shrink-0 mt-0.5" />
+                                      <span>{wo.message || wo.code}</span>
+                                    </li>
+                                  ))}
+                                </ul>
+                              </TooltipContent>
+                            </Tooltip>
+                          );
+                        })()}
                         {/* Auto-create item toggle */}
                         {matches.items?.[index]?.proposedNewItem && (
                           <button
@@ -1256,6 +1329,26 @@ export default function PurchaseInvoiceTaskPage() {
                                           handleItemChange(index, 'itemGroup', opt.group);
                                           setActiveStockIdx(null);
                                           setStockSearch("");
+                                          // Fetch full stock detail to fill accNo, taxCode, uom
+                                          void getStockDetail(opt.itemCode, accessToken ?? undefined).then((detail) => {
+                                            if (!detail) return;
+                                            const gi = detail.groupInfo as Record<string, unknown> | undefined;
+                                            setPayload((prev) => {
+                                              if (!prev) return prev;
+                                              const newDetails = [...prev.details];
+                                              const current = newDetails[index];
+                                              if (!current) return prev;
+                                              newDetails[index] = {
+                                                ...current,
+                                                accNo: (gi?.purchaseCode as string) ?? detail.accNo ?? current.accNo,
+                                                taxCode: detail.purchaseTaxCode ?? detail.taxCode ?? current.taxCode,
+                                                itemGroup: detail.itemGroup ?? current.itemGroup,
+                                                uom: detail.purchaseUOM ?? detail.baseUOM ?? current.uom,
+                                                description: detail.description ?? current.description,
+                                              };
+                                              return { ...prev, details: newDetails };
+                                            });
+                                          });
                                         }}
                                       >
                                         <div className="flex flex-col">
@@ -1273,40 +1366,20 @@ export default function PurchaseInvoiceTaskPage() {
                             </PopoverContent>
                           </Popover>
                         )}
-                      <input
-                        type="text"
-                        value={item.accNo || ''}
-                        onChange={(e) => handleItemChange(index, 'accNo', e.target.value)}
-                        placeholder="Acc No"
-                        className={cn("w-full border rounded-lg px-2 py-2 text-sm transition-all duration-200 outline-none", getBorderClass('acc_no', index + 1))}
-                      />
-                      <input
-                        type="text"
-                        value={item.qty}
-                        onChange={(e) => handleItemChange(index, 'qty', parseNumber(e.target.value))}
-                        className={cn("w-full border rounded-lg px-2 py-2 text-sm text-center transition-all duration-200 outline-none", getBorderClass('qty', index + 1))}
-                      />
-                      <input
-                        type="text"
-                        value={item.uom || ''}
-                        onChange={(e) => handleItemChange(index, 'uom', e.target.value)}
-                        placeholder="UOM"
-                        className={cn("w-full border rounded-lg px-2 py-2 text-sm text-center transition-all duration-200 outline-none", getBorderClass('uom', index + 1))}
-                      />
-                      <input
-                        type="text"
-                        value={item.unitPrice}
-                        onChange={(e) => handleItemChange(index, 'unitPrice', parseNumber(e.target.value))}
-                        className={cn("w-full border rounded-lg px-2 py-2 text-sm text-right transition-all duration-200 outline-none", getBorderClass('unit_price', index + 1))}
-                      />
-                      <div className="relative flex items-center">
-                        <span className="absolute left-2 text-xs text-gray-500 pointer-events-none">{payload.currencyCode}</span>
-                        <input
-                          type="text"
-                          value={item.amount}
-                          onChange={(e) => handleItemChange(index, 'amount', parseNumber(e.target.value))}
-                          className={cn("w-full border rounded-lg pl-10 pr-2 py-2 text-sm text-right transition-all duration-200 outline-none", getBorderClass('amount', index + 1))}
-                        />
+                      <div className="w-full border rounded-lg px-2 py-2 text-sm bg-zinc-50 text-zinc-600 h-[38px] flex items-center">
+                        {item.accNo || ''}
+                      </div>
+                      <div className="w-full border rounded-lg px-2 py-2 text-sm text-center bg-zinc-50 text-zinc-600 h-[38px] flex items-center justify-center">
+                        {String(item.qty)}
+                      </div>
+                      <div className="w-full border rounded-lg px-2 py-2 text-sm text-center bg-zinc-50 text-zinc-600 h-[38px] flex items-center justify-center">
+                        {item.uom || ''}
+                      </div>
+                      <div className="w-full border rounded-lg px-2 py-2 text-sm text-right bg-zinc-50 text-zinc-600 h-[38px] flex items-center justify-end">
+                        {String(item.unitPrice)}
+                      </div>
+                      <div className="w-full border rounded-lg px-2 py-2 text-sm text-right bg-zinc-50 text-zinc-600 h-[38px] flex items-center justify-end">
+                        {String(item.amount)}
                       </div>
                       <div className="flex items-center justify-center gap-1">
                         <button
@@ -1319,7 +1392,7 @@ export default function PurchaseInvoiceTaskPage() {
                         </button>
                         <button
                           type="button"
-                          onClick={() => removeItem(index)}
+                          onClick={() => setDeletingItemIndex(index)}
                           className="text-gray-400 hover:text-red-500 transition-colors p-1"
                         >
                           <Trash2 className="w-4 h-4" />
@@ -1350,39 +1423,27 @@ export default function PurchaseInvoiceTaskPage() {
                 <div className="grid gap-4 py-4">
                   <div>
                     <label className="text-sm font-medium mb-1.5 block">Description</label>
-                    <input
-                      type="text"
-                      className="flex h-10 w-full rounded-md border border-gray-200 px-3 py-2 text-sm focus:outline-none focus:ring-1 focus:ring-gray-300"
-                      value={payload.details[editingItemIndex].description || ''}
-                      onChange={(e) => handleItemChange(editingItemIndex, 'description', e.target.value)}
-                    />
+                    <div className="flex h-10 w-full items-center rounded-md border border-gray-200 bg-zinc-50 px-3 py-2 text-sm text-zinc-600">
+                      {payload.details[editingItemIndex].description || ''}
+                    </div>
                   </div>
                   <div>
                     <label className="text-sm font-medium mb-1.5 block">Description 2 (desc2)</label>
-                    <input
-                      type="text"
-                      className="flex h-10 w-full rounded-md border border-gray-200 px-3 py-2 text-sm focus:outline-none focus:ring-1 focus:ring-gray-300"
-                      value={payload.details[editingItemIndex].desc2 || ''}
-                      onChange={(e) => handleItemChange(editingItemIndex, 'desc2', e.target.value)}
-                    />
+                    <div className="flex h-10 w-full items-center rounded-md border border-gray-200 bg-zinc-50 px-3 py-2 text-sm text-zinc-600">
+                      {payload.details[editingItemIndex].desc2 || ''}
+                    </div>
                   </div>
                   <div>
                     <label className="text-sm font-medium mb-1.5 block">Tax Code</label>
-                    <input
-                      type="text"
-                      className="flex h-10 w-full rounded-md border border-gray-200 px-3 py-2 text-sm focus:outline-none focus:ring-1 focus:ring-gray-300"
-                      value={payload.details[editingItemIndex].taxCode || ''}
-                      onChange={(e) => handleItemChange(editingItemIndex, 'taxCode', e.target.value)}
-                    />
+                    <div className="flex h-10 w-full items-center rounded-md border border-gray-200 bg-zinc-50 px-3 py-2 text-sm text-zinc-600">
+                      {payload.details[editingItemIndex].taxCode || ''}
+                    </div>
                   </div>
                   <div>
                     <label className="text-sm font-medium mb-1.5 block">Item Group (Creation only)</label>
-                    <input
-                      type="text"
-                      className="flex h-10 w-full rounded-md border border-gray-200 px-3 py-2 text-sm focus:outline-none focus:ring-1 focus:ring-gray-300"
-                      value={payload.details[editingItemIndex].itemGroup || ''}
-                      onChange={(e) => handleItemChange(editingItemIndex, 'itemGroup', e.target.value)}
-                    />
+                    <div className="flex h-10 w-full items-center rounded-md border border-gray-200 bg-zinc-50 px-3 py-2 text-sm text-zinc-600">
+                      {payload.details[editingItemIndex].itemGroup || ''}
+                    </div>
                   </div>
                 </div>
               )}
@@ -1393,6 +1454,39 @@ export default function PurchaseInvoiceTaskPage() {
                   className="rounded-md bg-zinc-900 px-4 py-2 text-sm font-medium text-white hover:bg-zinc-800"
                 >
                   Confirm
+                </button>
+              </DialogFooter>
+            </DialogContent>
+          </Dialog>
+
+          {/* Delete confirmation dialog */}
+          <Dialog open={deletingItemIndex !== null} onOpenChange={(open) => !open && setDeletingItemIndex(null)}>
+            <DialogContent className="sm:max-w-[360px] bg-white">
+              <DialogHeader>
+                <DialogTitle>Delete item?</DialogTitle>
+              </DialogHeader>
+              <p className="text-sm text-zinc-500">
+                {deletingItemIndex !== null && payload.details[deletingItemIndex]
+                  ? <>Remove <span className="font-medium text-zinc-900">{payload.details[deletingItemIndex].itemCode || 'this item'}</span> from the invoice?</>
+                  : 'This action cannot be undone.'}
+              </p>
+              <DialogFooter className="gap-2">
+                <button
+                  type="button"
+                  onClick={() => setDeletingItemIndex(null)}
+                  className="rounded-md border border-zinc-200 px-4 py-2 text-sm font-medium text-zinc-700 hover:bg-zinc-50"
+                >
+                  Cancel
+                </button>
+                <button
+                  type="button"
+                  onClick={() => {
+                    if (deletingItemIndex !== null) removeItem(deletingItemIndex);
+                    setDeletingItemIndex(null);
+                  }}
+                  className="rounded-md bg-red-600 px-4 py-2 text-sm font-medium text-white hover:bg-red-700"
+                >
+                  Delete
                 </button>
               </DialogFooter>
             </DialogContent>
@@ -1434,14 +1528,17 @@ export default function PurchaseInvoiceTaskPage() {
               <div className="grid grid-cols-2 gap-8 mb-10">
                 <div>
                   <div className="text-sm text-gray-500 mb-2">Creditor:</div>
-                  <div className="text-base font-medium mb-1">{payload.creditorCode || '-'}</div>
+                  <div className="text-base font-medium mb-0.5">{payload.creditorCode || ''}</div>
+                  {creditorCompanyName && (
+                    <div className="text-sm font-medium text-gray-700 mb-1 break-words max-w-xs">{creditorCompanyName}</div>
+                  )}
                   <div className="text-sm text-gray-500 max-w-lg leading-relaxed">
                     {payload.creditorAddressLines?.join(', ') || 'No address provided'}
                   </div>
                 </div>
                 <div>
                   <div className="text-sm text-gray-500 mb-2">Purchase Agent:</div>
-                  <div className="text-base font-medium mb-1">{payload.purchaseAgent || '-'}</div>
+                  <div className="text-base font-medium mb-1">{payload.purchaseAgent || ''}</div>
                 </div>
               </div>
 
@@ -1460,8 +1557,8 @@ export default function PurchaseInvoiceTaskPage() {
                   <tbody className="divide-y divide-gray-50">
                     {payload.details.map((item, index) => (
                       <tr key={index}>
-                        <td className="py-4 font-medium">{item.itemCode || '-'}</td>
-                        <td className="py-4 text-gray-600">{item.accNo || '-'}</td>
+                        <td className="py-4 font-medium">{item.itemCode || ''}</td>
+                        <td className="py-4 text-gray-600">{item.accNo || ''}</td>
                         <td className="py-4 text-right text-gray-600">{item.qty} {item.uom}</td>
                         <td className="py-4 text-right text-gray-600">{formatNumber(item.unitPrice)}</td>
                         <td className="py-4 text-right font-medium">{formatNumber(item.amount)}</td>
@@ -1479,10 +1576,12 @@ export default function PurchaseInvoiceTaskPage() {
                     <span className="text-gray-500">Subtotal ({payload.currencyCode})</span>
                     <span className="font-medium">{formatNumber(subtotal)}</span>
                   </div>
+                  {taxAmount > 0 && (
                   <div className="flex justify-between text-sm">
                     <span className="text-gray-500">Auto Tax (11% if code present)</span>
                     <span className="font-medium">{formatNumber(taxAmount.toFixed(2))}</span>
                   </div>
+                  )}
                   <div className="flex justify-between text-base font-semibold pt-3 border-t border-gray-100">
                     <span className="text-zinc-900">Total</span>
                     <span className="text-zinc-900">{formatNumber(totalAmount.toFixed(2))}</span>
@@ -1505,6 +1604,17 @@ export default function PurchaseInvoiceTaskPage() {
         </div>
       </div>
     </div>
+    <BatchStatusModal
+      isOpen={isStatsModalOpen}
+      batchId={groupId || taskId}
+      groupId={groupId || undefined}
+      items={groupItems}
+      allDone={groupAllDone}
+      now={groupNow}
+      submitStatus={submitStatus ?? undefined}
+      warningCount={groupItems.reduce((a, i) => a + (i.warningCount ?? 0), 0)}
+      onClose={() => setIsStatsModalOpen(false)}
+    />
     </TooltipProvider>
   );
 }

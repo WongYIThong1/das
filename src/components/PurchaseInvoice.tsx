@@ -18,7 +18,6 @@ import {
   Store,
   FileDigit,
   Plus,
-  Search,
   ArrowUpDown,
   ArrowUpRight,
   Clock3,
@@ -35,7 +34,9 @@ import { Calendar } from '@/components/ui/calendar';
 import { Popover, PopoverContent, PopoverTrigger } from '@/components/ui/popover';
 import { Slider } from '@/components/ui/slider';
 import { UploadInvoiceModal } from './UploadInvoiceModal';
+import { BatchPreviewModal } from './BatchPreviewModal';
 import DeleteConfirmModal from './DeleteConfirmModal';
+import { batchStore } from '../lib/batch-store';
 import { useAuth } from './AuthProvider';
 import { Input } from './ui/input';
 import { ApiRequestError } from '../lib/auth-api';
@@ -80,7 +81,15 @@ type FilterDraft = {
   grandTotalMax: string;
 };
 
-type InvoiceQuery = Omit<GetPurchaseInvoiceListParams, 'page' | 'pageSize'>;
+type InvoiceQuery = Omit<GetPurchaseInvoiceListParams, 'pageSize' | 'page' | 'accessToken' | 'bookId'>;
+
+type PrefetchedInvoicePage = {
+  queryKey: string;
+  page: number;
+  items: PurchaseInvoiceListItem[];
+  total: number;
+  hasNext: boolean;
+};
 
 const sortOptions: SortOption[] = [
   { label: 'Latest first', sortBy: 'date', sortOrder: 'desc' },
@@ -172,33 +181,33 @@ function clampValue(value: number, min: number, max: number) {
 
 export function PurchaseInvoice() {
   const router = useRouter();
-  const { clearAuthState } = useAuth();
+  const { profile, accessToken, clearAuthState } = useAuth();
   const [isUploadModalOpen, setIsUploadModalOpen] = useState(false);
+  const [batchFiles, setBatchFiles] = useState<File[]>([]);
+  const [isBatchModalOpen, setIsBatchModalOpen] = useState(false);
   const [isDisplayOpen, setIsDisplayOpen] = useState(false);
   const [selectedSortLabel, setSelectedSortLabel] = useState(sortOptions[0].label);
   const [selectedAutoRefreshLabel, setSelectedAutoRefreshLabel] = useState(autoRefreshOptions[0].label);
-  const [searchInput, setSearchInput] = useState('');
-  const [debouncedSearch, setDebouncedSearch] = useState('');
   const [draftFilters, setDraftFilters] = useState<FilterDraft>(defaultFilters);
   const [appliedFilters, setAppliedFilters] = useState<FilterDraft>(defaultFilters);
   const [deleteConfirmOpen, setDeleteConfirmOpen] = useState(false);
   const [invoiceToDelete, setInvoiceToDelete] = useState<EditableInvoice | null>(null);
   const [items, setItems] = useState<PurchaseInvoiceListItem[]>([]);
-  const [page, setPage] = useState(0);
   const [total, setTotal] = useState(0);
-  const [totalPages, setTotalPages] = useState(0);
-  const [company, setCompany] = useState('');
-  const [bookId, setBookId] = useState('');
+  const [currentPage, setCurrentPage] = useState(1);
+  const [hasNext, setHasNext] = useState(false);
+  const [prefetchedPage, setPrefetchedPage] = useState<PrefetchedInvoicePage | null>(null);
   const [isInitialLoading, setIsInitialLoading] = useState(true);
   const [isFetchingNextPage, setIsFetchingNextPage] = useState(false);
+  const [isPrefetchingNextPage, setIsPrefetchingNextPage] = useState(false);
   const [initialError, setInitialError] = useState<string | null>(null);
   const [nextPageError, setNextPageError] = useState<string | null>(null);
   const scrollContainerRef = useRef<HTMLDivElement | null>(null);
   const loadMoreRef = useRef<HTMLDivElement | null>(null);
   const displayMenuRef = useRef<HTMLDivElement>(null);
   const latestQueryKeyRef = useRef('');
-
-  const hasMore = totalPages > 0 && page < totalPages;
+  const prefetchRequestKeyRef = useRef<string | null>(null);
+  const prefetchedPageRef = useRef<PrefetchedInvoicePage | null>(null);
   const loadedCount = items.length;
   const selectedSortOption = useMemo(
     () => sortOptions.find((option) => option.label === selectedSortLabel) ?? sortOptions[0],
@@ -210,7 +219,6 @@ export function PurchaseInvoice() {
   );
   const currentQuery = useMemo<InvoiceQuery>(
     () => ({
-      search: debouncedSearch.trim() || undefined,
       sortBy: selectedSortOption.sortBy,
       sortOrder: selectedSortOption.sortOrder,
       supplier: appliedFilters.supplier.trim() || undefined,
@@ -219,13 +227,12 @@ export function PurchaseInvoice() {
       grandTotalMin: parseOptionalNumber(appliedFilters.grandTotalMin),
       grandTotalMax: parseOptionalNumber(appliedFilters.grandTotalMax),
     }),
-    [appliedFilters, debouncedSearch, selectedSortOption]
+    [appliedFilters, selectedSortOption]
   );
 
   const activeFilterCount = useMemo(
     () =>
       [
-        currentQuery.search,
         currentQuery.supplier,
         currentQuery.dateFrom,
         currentQuery.dateTo,
@@ -254,13 +261,116 @@ export function PurchaseInvoice() {
   const fromDate = useMemo(() => parseFilterDate(draftFilters.dateFrom), [draftFilters.dateFrom]);
   const toDate = useMemo(() => parseFilterDate(draftFilters.dateTo), [draftFilters.dateTo]);
 
+  useEffect(() => {
+    prefetchedPageRef.current = prefetchedPage;
+  }, [prefetchedPage]);
+
   const handleAuthFailure = useCallback(() => {
-    clearAuthState();
+    void clearAuthState();
     router.replace('/login');
   }, [clearAuthState, router]);
 
+  const fetchInvoices = useCallback(
+    async (page: number, query: InvoiceQuery) => {
+      if (!profile || !accessToken) {
+        throw new ApiRequestError('Your session is not ready yet.', 401);
+      }
+
+      return getPurchaseInvoiceList({
+        pageSize: PAGE_SIZE,
+        page,
+        accessToken,
+        bookId: profile.bookId,
+        ...query,
+      });
+    },
+    [accessToken, profile]
+  );
+
+  const applyInvoicePage = useCallback(
+    (
+      response: {
+        items: PurchaseInvoiceListItem[];
+        total: number;
+        page: number;
+        hasNext: boolean;
+      },
+      mode: 'replace' | 'append'
+    ) => {
+      setTotal(response.total);
+      setCurrentPage(response.page);
+      setHasNext(response.hasNext);
+      setItems((current) => {
+        if (mode === 'replace') {
+          return response.items;
+        }
+
+        const existingKeys = new Set(current.map((item) => item.supplierInvoiceNo));
+        const appended = response.items.filter((item) => !existingKeys.has(item.supplierInvoiceNo));
+        return current.concat(appended);
+      });
+    },
+    []
+  );
+
+  const prefetchInvoices = useCallback(
+    async (hasNextPage: boolean, loadedPage: number, query: InvoiceQuery) => {
+      const queryKey = JSON.stringify(query);
+
+      if (!hasNextPage) {
+        prefetchRequestKeyRef.current = null;
+        setPrefetchedPage(null);
+        setIsPrefetchingNextPage(false);
+        return;
+      }
+
+      if (latestQueryKeyRef.current !== queryKey) {
+        return;
+      }
+
+      const nextPage = loadedPage + 1;
+
+      if (prefetchedPageRef.current?.queryKey === queryKey && prefetchedPageRef.current.page === nextPage) {
+        return;
+      }
+
+      const requestKey = `${queryKey}:${nextPage}`;
+      if (prefetchRequestKeyRef.current === requestKey) {
+        return;
+      }
+
+      prefetchRequestKeyRef.current = requestKey;
+      setIsPrefetchingNextPage(true);
+
+      try {
+        const response = await fetchInvoices(nextPage, query);
+        if (latestQueryKeyRef.current !== queryKey || prefetchRequestKeyRef.current !== requestKey) {
+          return;
+        }
+
+        setPrefetchedPage({
+          queryKey,
+          page: nextPage,
+          items: response.items,
+          total: response.total,
+          hasNext: response.hasNext,
+        });
+      } catch {
+        if (latestQueryKeyRef.current === queryKey && prefetchRequestKeyRef.current === requestKey) {
+          setPrefetchedPage(null);
+        }
+      } finally {
+        if (prefetchRequestKeyRef.current === requestKey) {
+          prefetchRequestKeyRef.current = null;
+          setIsPrefetchingNextPage(false);
+        }
+      }
+    },
+    [fetchInvoices]
+  );
+
   const loadInvoices = useCallback(
-    async (targetPage: number, mode: 'replace' | 'append', query: InvoiceQuery) => {
+    async (page: number, mode: 'replace' | 'append', query: InvoiceQuery) => {
       const queryKey = JSON.stringify(query);
 
       if (mode === 'replace') {
@@ -273,26 +383,15 @@ export function PurchaseInvoice() {
       }
 
       try {
-        const response = await getPurchaseInvoiceList({ page: targetPage, pageSize: PAGE_SIZE, ...query });
+        const response = await fetchInvoices(page, query);
 
         if (latestQueryKeyRef.current !== queryKey) {
           return;
         }
 
-        setPage(response.page);
-        setTotal(response.total);
-        setTotalPages(response.totalPages);
-        setCompany(response.company);
-        setBookId(response.bookId);
-        setItems((current) => {
-          if (mode === 'replace') {
-            return response.items;
-          }
-
-          const existingKeys = new Set(current.map((item) => item.supplierInvoiceNo));
-          const appended = response.items.filter((item) => !existingKeys.has(item.supplierInvoiceNo));
-          return current.concat(appended);
-        });
+        applyInvoicePage(response, mode);
+        setPrefetchedPage(null);
+        void prefetchInvoices(response.hasNext, response.page, query);
       } catch (error) {
         if (latestQueryKeyRef.current !== queryKey) {
           return;
@@ -321,16 +420,62 @@ export function PurchaseInvoice() {
         }
       }
     },
-    [handleAuthFailure]
+    [applyInvoicePage, fetchInvoices, handleAuthFailure, prefetchInvoices]
   );
 
-  useEffect(() => {
-    const timer = window.setTimeout(() => {
-      setDebouncedSearch(searchInput);
-    }, 1000);
+  const loadNextPage = useCallback(async () => {
+    if (!hasNext || isInitialLoading || isFetchingNextPage || !profile) {
+      return;
+    }
 
-    return () => window.clearTimeout(timer);
-  }, [searchInput]);
+    const queryKey = JSON.stringify(currentQuery);
+    const nextPage = currentPage + 1;
+    setNextPageError(null);
+    setIsFetchingNextPage(true);
+
+    try {
+      const response =
+        prefetchedPageRef.current?.queryKey === queryKey && prefetchedPageRef.current.page === nextPage
+          ? prefetchedPageRef.current
+          : await fetchInvoices(nextPage, currentQuery);
+
+      if (latestQueryKeyRef.current !== queryKey) {
+        return;
+      }
+
+      applyInvoicePage(response, 'append');
+      setPrefetchedPage(null);
+      void prefetchInvoices(response.hasNext, response.page, currentQuery);
+    } catch (error) {
+      if (latestQueryKeyRef.current !== queryKey) {
+        return;
+      }
+
+      if (error instanceof ApiRequestError && error.status === 401) {
+        handleAuthFailure();
+        return;
+      }
+
+      setNextPageError(getErrorMessage(error, 'Unable to load more purchase invoices.'));
+    } finally {
+      if (latestQueryKeyRef.current !== queryKey) {
+        return;
+      }
+
+      setIsFetchingNextPage(false);
+    }
+  }, [
+    applyInvoicePage,
+    currentPage,
+    currentQuery,
+    fetchInvoices,
+    handleAuthFailure,
+    hasNext,
+    isFetchingNextPage,
+    isInitialLoading,
+    prefetchInvoices,
+    profile,
+  ]);
 
   useEffect(() => {
     const timer = window.setTimeout(() => {
@@ -347,26 +492,39 @@ export function PurchaseInvoice() {
   }, [draftFilters]);
 
   useEffect(() => {
+    if (!profile) {
+      return;
+    }
+
     const queryKey = JSON.stringify(currentQuery);
     latestQueryKeyRef.current = queryKey;
+    prefetchRequestKeyRef.current = null;
     setItems([]);
-    setPage(0);
     setTotal(0);
-    setTotalPages(0);
+    setCurrentPage(1);
+    setHasNext(false);
+    setPrefetchedPage(null);
+    setIsPrefetchingNextPage(false);
     setNextPageError(null);
     scrollContainerRef.current?.scrollTo({ top: 0 });
     void loadInvoices(1, 'replace', currentQuery);
-  }, [currentQuery, loadInvoices]);
+  }, [currentQuery, loadInvoices, profile]);
 
   useEffect(() => {
+    if (!profile) {
+      return;
+    }
+
     const shouldRefresh = sessionStorage.getItem('pi:list:refresh');
     if (!shouldRefresh) {
       return;
     }
     sessionStorage.removeItem('pi:list:refresh');
     latestQueryKeyRef.current = JSON.stringify(currentQuery);
+    prefetchRequestKeyRef.current = null;
+    setPrefetchedPage(null);
     void loadInvoices(1, 'replace', currentQuery);
-  }, [currentQuery, loadInvoices]);
+  }, [currentQuery, loadInvoices, profile]);
 
   useEffect(() => {
     function handleClickOutside(event: MouseEvent) {
@@ -383,7 +541,7 @@ export function PurchaseInvoice() {
     if (!scrollContainerRef.current || !loadMoreRef.current) {
       return;
     }
-    if (isInitialLoading || isFetchingNextPage || initialError || nextPageError || !hasMore) {
+    if (isInitialLoading || isFetchingNextPage || initialError || nextPageError || !hasNext) {
       return;
     }
 
@@ -393,31 +551,33 @@ export function PurchaseInvoice() {
         if (!entry?.isIntersecting) {
           return;
         }
-        void loadInvoices(page + 1, 'append', currentQuery);
+        void loadNextPage();
       },
       {
         root: scrollContainerRef.current,
-        rootMargin: '0px 0px 320px 0px',
+        rootMargin: '0px 0px 640px 0px',
         threshold: 0.01,
       }
     );
 
     observer.observe(loadMoreRef.current);
     return () => observer.disconnect();
-  }, [currentQuery, hasMore, initialError, isFetchingNextPage, isInitialLoading, loadInvoices, nextPageError, page]);
+  }, [hasNext, initialError, isFetchingNextPage, isInitialLoading, loadNextPage, nextPageError]);
 
   useEffect(() => {
-    if (!selectedAutoRefreshOption.intervalMs) {
+    if (!selectedAutoRefreshOption.intervalMs || !profile) {
       return;
     }
 
     const timer = window.setInterval(() => {
       latestQueryKeyRef.current = JSON.stringify(currentQuery);
+      prefetchRequestKeyRef.current = null;
+      setPrefetchedPage(null);
       void loadInvoices(1, 'replace', currentQuery);
     }, selectedAutoRefreshOption.intervalMs);
 
     return () => window.clearInterval(timer);
-  }, [currentQuery, loadInvoices, selectedAutoRefreshOption.intervalMs]);
+  }, [currentQuery, loadInvoices, profile, selectedAutoRefreshOption.intervalMs]);
 
   const handleDeleteClick = (invoice: EditableInvoice) => {
     setInvoiceToDelete(invoice);
@@ -435,8 +595,6 @@ export function PurchaseInvoice() {
   };
 
   const handleResetFilters = () => {
-    setSearchInput('');
-    setDebouncedSearch('');
     setDraftFilters({ ...defaultFilters });
     setAppliedFilters({ ...defaultFilters });
     setSelectedSortLabel(sortOptions[0].label);
@@ -467,7 +625,7 @@ export function PurchaseInvoice() {
             <p className="mt-2 text-sm leading-6 text-zinc-600">{initialError}</p>
             <button
               type="button"
-              onClick={() => void loadInvoices(1, 'replace', currentQuery)}
+              onClick={() => void loadInvoices(null, 'replace', currentQuery)}
               className="mt-5 rounded-xl bg-zinc-900 px-4 py-2 text-sm font-semibold text-white transition hover:bg-zinc-800"
             >
               Retry
@@ -519,7 +677,7 @@ export function PurchaseInvoice() {
                 <Button
                   type="button"
                   variant="outline"
-                  onClick={() => void loadInvoices(1, 'replace', currentQuery)}
+                  onClick={() => void loadInvoices(null, 'replace', currentQuery)}
                   className="rounded-xl px-4 py-2.5 text-sm"
                 >
                   Reload List
@@ -674,15 +832,17 @@ export function PurchaseInvoice() {
               <p className="text-red-600">{nextPageError}</p>
               <button
                 type="button"
-                onClick={() => void loadInvoices(page + 1, 'append', currentQuery)}
+                onClick={() => void loadNextPage()}
                 className="rounded-lg border border-zinc-200 bg-white px-3 py-1.5 text-[11px] font-semibold text-zinc-700 transition hover:border-zinc-300 hover:bg-zinc-50"
               >
                 Retry load more
               </button>
             </>
           )}
-          {!isFetchingNextPage && !nextPageError && hasMore && <p>Scroll down to load the next page.</p>}
-          {!hasMore && <p>No more invoices.</p>}
+          {!isFetchingNextPage && !nextPageError && hasNext && (
+            <p>{isPrefetchingNextPage ? 'Preparing the next page...' : 'Scroll down to load the next page.'}</p>
+          )}
+          {!hasNext && <p>No more invoices.</p>}
         </div>
       </>
     );
@@ -717,25 +877,14 @@ export function PurchaseInvoice() {
               </span>
             </div>
             <p className="text-xs text-zinc-500">
-              {company
-                ? `Loaded ${loadedCount} of ${total} invoices for ${company}${bookId ? ` | ${bookId}` : ''}.`
+              {total > 0
+                ? `Loaded ${loadedCount} of ${total} invoices${profile?.bookId ? ` | ${profile.bookId}` : ''}.`
                 : 'Manage your purchase invoices and load more results as you scroll.'}
             </p>
           </div>
 
           <div className="flex min-h-[40px] shrink-0 flex-col gap-3 px-6 py-2">
-            <div className="flex items-center justify-between gap-4">
-              <div className="group relative max-w-md flex-1">
-                <Search size={14} className="absolute left-3 top-1/2 -translate-y-1/2 text-zinc-400 transition-colors group-focus-within:text-blue-500" />
-                <Input
-                  type="text"
-                  value={searchInput}
-                  onChange={(event) => setSearchInput(event.target.value)}
-                  placeholder="Search doc id, supplier, agent, date, amount, or invoice no"
-                  className="bg-zinc-50 py-1.5 pl-9 pr-4 text-xs"
-                />
-              </div>
-
+            <div className="flex items-center justify-end gap-4">
               <div className="flex items-center gap-2">
                 <div className="relative" ref={displayMenuRef}>
                   <motion.button
@@ -1001,6 +1150,20 @@ export function PurchaseInvoice() {
               } else {
                 toast.error('Preview task ID is missing. Please retry the upload.');
               }
+            }}
+            onBatchFiles={(files) => {
+              setIsUploadModalOpen(false);
+              setBatchFiles(files);
+              setIsBatchModalOpen(true);
+            }}
+          />
+
+          <BatchPreviewModal
+            isOpen={isBatchModalOpen}
+            files={batchFiles}
+            onClose={() => {
+              setIsBatchModalOpen(false);
+              setBatchFiles([]);
             }}
           />
 

@@ -1,13 +1,13 @@
 'use client';
 
-import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState } from 'react';
+import { createContext, useCallback, useContext, useMemo, useRef, useState } from 'react';
 import {
   submitPurchaseInvoice,
   getPurchaseInvoiceSubmitTask,
   type PurchaseInvoiceSubmitRequest,
   type PurchaseInvoiceSubmitTaskStatus,
   type PurchaseInvoiceSubmitTaskResponse,
-  type PurchaseInvoiceSubmitResponse,
+  type PurchaseInvoiceSubmitValidationError,
 } from '../lib/purchase-invoice-submit-api';
 import { ApiRequestError } from '../lib/auth-api';
 
@@ -18,44 +18,41 @@ import { ApiRequestError } from '../lib/auth-api';
 export type SubmitPhase = PurchaseInvoiceSubmitTaskStatus;
 
 export type SubmitStepInfo = {
-  /** Progress value 0-100 */
   progress: number;
-  /** User-friendly label */
   label: string;
-  /** Shorter secondary text shown below the label */
   description: string;
 };
 
 const STEP_MAP: Record<SubmitPhase, SubmitStepInfo> = {
   queued: {
-    progress: 8,
-    label: 'Transmission',
-    description: 'Securing your connection and queueing the invoice for processing.',
-  },
-  preparing: {
-    progress: 25,
-    label: 'Synthesis',
-    description: 'Finalizing invoice metadata and preparing missing master data records.',
+    progress: 10,
+    label: 'Queued',
+    description: 'Invoice is queued and waiting to be processed.',
   },
   validating: {
-    progress: 50,
-    label: 'Compliance Audit',
-    description: 'Running AI audit and ledger validation rules to ensure data integrity.',
+    progress: 35,
+    label: 'Validating',
+    description: 'Checking invoice data, item codes, and ledger rules.',
   },
-  dispatching: {
-    progress: 75,
-    label: 'Ledger Integration',
-    description: 'Writing creditors, stock items, and the final invoice into your accounting system.',
+  creating_stock: {
+    progress: 65,
+    label: 'Creating Stock',
+    description: 'Creating new stock items proposed by the system.',
   },
-  succeeded: {
+  creating_pi: {
+    progress: 85,
+    label: 'Creating Invoice',
+    description: 'Writing the purchase invoice into the accounting system.',
+  },
+  completed: {
     progress: 100,
-    label: 'Finalized',
-    description: 'Transaction complete. Your purchase invoice has been successfully ledgered.',
+    label: 'Completed',
+    description: 'Purchase invoice has been successfully created.',
   },
   failed: {
     progress: -1,
-    label: 'Submission Failed',
-    description: 'An error occurred during the integration process. Please review and retry.',
+    label: 'Failed',
+    description: 'An error occurred. Please review the details and retry.',
   },
 };
 
@@ -64,27 +61,18 @@ export function getStepInfo(status: SubmitPhase): SubmitStepInfo {
 }
 
 // ---------------------------------------------------------------------------
-// Context value
+// Context
 // ---------------------------------------------------------------------------
 
 export type SubmitContextValue = {
-  /** Whether the modal should be visible */
   isOpen: boolean;
-  /** Current backend status */
   status: SubmitPhase | null;
-  /** Derived step info */
   stepInfo: SubmitStepInfo | null;
-  /** Full task response (available once first poll returns) */
   task: PurchaseInvoiceSubmitTaskResponse | null;
-  /** Final result (only when succeeded or partially succeeded) */
-  result: (PurchaseInvoiceSubmitResponse & { validation?: unknown }) | null;
-  /** Error message when failed */
+  result: null;
   errorMessage: string | null;
-  /** Whether the submit is still in-flight */
   isRunning: boolean;
-  /** Kick off a submit */
-  startSubmit: (request: PurchaseInvoiceSubmitRequest) => Promise<void>;
-  /** Close the modal (only allowed when not running) */
+  startSubmit: (request: PurchaseInvoiceSubmitRequest, options?: { silent?: boolean }) => Promise<void>;
   dismiss: () => void;
 };
 
@@ -96,276 +84,263 @@ const SubmitContext = createContext<SubmitContextValue | null>(null);
 
 const POLL_INTERVAL_MS = 1500;
 const POLL_TIMEOUT_MS = 180_000;
+
 const SUBMIT_STORAGE_KEY = 'pi:submit:task';
-const SUBMIT_REQUEST_STORAGE_KEY = 'pi:submit:request';
 
-type StoredSubmitTask = {
-  taskId: string;
-  startedAt: number;
-};
+type StoredTask = { submitId: string; accessToken?: string; startedAt: number };
 
-type StoredSubmitRequest = {
-  request: PurchaseInvoiceSubmitRequest;
-  startedAt: number;
-};
-
-function readStoredSubmitTask(): StoredSubmitTask | null {
+function readStored(): StoredTask | null {
   if (typeof window === 'undefined') return null;
   try {
     const raw = window.sessionStorage.getItem(SUBMIT_STORAGE_KEY);
     if (!raw) return null;
-    const parsed = JSON.parse(raw) as Partial<StoredSubmitTask>;
-    if (typeof parsed.taskId !== 'string' || !parsed.taskId) return null;
-    if (typeof parsed.startedAt !== 'number' || !Number.isFinite(parsed.startedAt)) return null;
-    return { taskId: parsed.taskId, startedAt: parsed.startedAt };
-  } catch {
-    return null;
-  }
+    const p = JSON.parse(raw) as Partial<StoredTask>;
+    if (typeof p.submitId !== 'string' || !p.submitId) return null;
+    if (typeof p.startedAt !== 'number') return null;
+    return { submitId: p.submitId, accessToken: p.accessToken, startedAt: p.startedAt };
+  } catch { return null; }
 }
 
-function writeStoredSubmitTask(task: StoredSubmitTask | null) {
+function writeStored(v: StoredTask | null) {
   if (typeof window === 'undefined') return;
   try {
-    if (!task) {
-      window.sessionStorage.removeItem(SUBMIT_STORAGE_KEY);
-      return;
-    }
-    window.sessionStorage.setItem(SUBMIT_STORAGE_KEY, JSON.stringify(task));
-  } catch {
-    // ignore
-  }
+    if (!v) window.sessionStorage.removeItem(SUBMIT_STORAGE_KEY);
+    else window.sessionStorage.setItem(SUBMIT_STORAGE_KEY, JSON.stringify(v));
+  } catch { /* ignore */ }
 }
 
-function readStoredSubmitRequest(): StoredSubmitRequest | null {
-  if (typeof window === 'undefined') return null;
-  try {
-    const raw = window.sessionStorage.getItem(SUBMIT_REQUEST_STORAGE_KEY);
-    if (!raw) return null;
-    const parsed = JSON.parse(raw) as Partial<StoredSubmitRequest>;
-    if (!parsed || typeof parsed !== 'object') return null;
-    if (typeof parsed.startedAt !== 'number' || !Number.isFinite(parsed.startedAt)) return null;
-    const req = parsed.request as PurchaseInvoiceSubmitRequest | undefined;
-    if (!req || typeof req !== 'object') return null;
-    if (typeof (req as any).requestId !== 'string' || !(req as any).requestId) return null;
-    if (typeof (req as any).previewTaskId !== 'string' || !(req as any).previewTaskId) return null;
-    return { request: req, startedAt: parsed.startedAt };
-  } catch {
-    return null;
+function formatErrorMessage(
+  validationErrors: PurchaseInvoiceSubmitValidationError[] | undefined,
+  lastError: string | undefined,
+  fallback: string
+): string {
+  if (validationErrors && validationErrors.length > 0) {
+    return validationErrors.map((e) => e.message).filter(Boolean).join('; ') || fallback;
   }
-}
-
-function writeStoredSubmitRequest(value: StoredSubmitRequest | null) {
-  if (typeof window === 'undefined') return;
-  try {
-    if (!value) {
-      window.sessionStorage.removeItem(SUBMIT_REQUEST_STORAGE_KEY);
-      return;
-    }
-    window.sessionStorage.setItem(SUBMIT_REQUEST_STORAGE_KEY, JSON.stringify(value));
-  } catch {
-    // ignore
+  if (lastError === 'worker_unavailable') {
+    return 'The accounting system worker is offline. Please contact your administrator.';
   }
+  return lastError || fallback;
 }
 
 export function SubmitProvider({ children }: { children: React.ReactNode }) {
   const [isOpen, setIsOpen] = useState(false);
   const [status, setStatus] = useState<SubmitPhase | null>(null);
   const [task, setTask] = useState<PurchaseInvoiceSubmitTaskResponse | null>(null);
-  const [result, setResult] = useState<(PurchaseInvoiceSubmitResponse & { validation?: unknown }) | null>(null);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
   const [isRunning, setIsRunning] = useState(false);
-
-  // Prevent concurrent submits
   const runningRef = useRef(false);
+  // Holds the AbortController for the active SSE connection so it can be
+  // cancelled when the user dismisses the modal or the component unmounts.
+  const listenAbortRef = useRef<AbortController | null>(null);
 
   const dismiss = useCallback(() => {
-    if (runningRef.current) return; // can't dismiss while running
-    writeStoredSubmitTask(null);
-    writeStoredSubmitRequest(null);
+    if (runningRef.current) return;
+    listenAbortRef.current?.abort();
+    listenAbortRef.current = null;
+    writeStored(null);
     setIsOpen(false);
-    // Reset state for next submit
     setStatus(null);
     setTask(null);
-    setResult(null);
     setErrorMessage(null);
   }, []);
 
-  const pollSubmitTask = useCallback(async (submitTaskId: string, startedAt: number) => {
-    if (runningRef.current) return;
-    runningRef.current = true;
-    setIsRunning(true);
-    setIsOpen(true);
-    setStatus((current) => current ?? 'queued');
-    setErrorMessage(null);
+  // Processes a snapshot/status object from either SSE or polling.
+  // Returns true if a terminal state was reached.
+  const processSnapshot = useCallback((data: Partial<PurchaseInvoiceSubmitTaskResponse>): boolean => {
+    if (data.submitId) setTask(data as PurchaseInvoiceSubmitTaskResponse);
+
+    const newStatus = data.status;
+    if (newStatus) setStatus(newStatus);
+
+    if (newStatus === 'completed') return true;
+
+    if (newStatus === 'failed') {
+      setErrorMessage(formatErrorMessage(data.validationErrors, data.lastError, 'Purchase invoice creation failed.'));
+      return true;
+    }
+
+    return false;
+  }, []);
+
+  // SSE-based listener — returns normally on terminal state, throws if connection fails.
+  const listenSSE = useCallback(async (
+    submitId: string,
+    accessToken: string | undefined,
+    startedAt: number,
+    signal?: AbortSignal,
+  ): Promise<void> => {
+    const headers: Record<string, string> = { Accept: 'text/event-stream' };
+    if (accessToken) headers['Authorization'] = `Bearer ${accessToken}`;
+
+    const response = await fetch(`/api/purchase-invoice/submits/${submitId}/stream`, { headers, signal });
+    if (!response.ok || !response.body) throw new Error('sse_unavailable');
+
+    const reader = response.body.getReader();
+    const decoder = new TextDecoder();
+    let buf = '';
+
+    const ERROR_EVENTS = new Set(['validation_failed', 'stock_create_error', 'pi_create_error']);
 
     try {
       while (true) {
-        const taskRes = await getPurchaseInvoiceSubmitTask(submitTaskId);
-        setTask(taskRes);
-        setStatus(taskRes.status);
-
-        if (taskRes.status === 'succeeded' && taskRes.result) {
-          setResult(taskRes.result);
-          return;
-        }
-
-        if (taskRes.status === 'failed') {
-          const msg = taskRes.error || taskRes.message || 'Purchase invoice creation failed.';
-          setErrorMessage(msg);
-          if (taskRes.result) {
-            setResult(taskRes.result);
-          }
-          return;
-        }
-
         if (Date.now() - startedAt > POLL_TIMEOUT_MS) {
-          setErrorMessage('The operation timed out. Please check the invoice list to see if it was created, or try again.');
+          setErrorMessage('The operation timed out. Please check the invoice list.');
           return;
         }
 
-        await new Promise((resolve) => setTimeout(resolve, POLL_INTERVAL_MS));
+        const { done, value } = await reader.read();
+
+        if (value?.length) {
+          buf += decoder.decode(value, { stream: !done });
+        }
+        const blocks = buf.split('\n\n');
+        buf = done ? '' : (blocks.pop() ?? '');
+
+        for (const block of blocks) {
+          if (!block.trim()) continue;
+
+          let eventName = 'message';
+          let dataStr = '';
+          for (const line of block.split('\n')) {
+            if (line.startsWith('event:')) eventName = line.slice(6).trim();
+            else if (line.startsWith('data:')) dataStr = line.slice(5).trim();
+          }
+
+          if (!dataStr) continue;
+          let parsed: Partial<PurchaseInvoiceSubmitTaskResponse>;
+          try { parsed = JSON.parse(dataStr); } catch { continue; }
+
+          const isTerminal = processSnapshot(parsed);
+
+          if (ERROR_EVENTS.has(eventName) && !isTerminal) {
+            setStatus('failed');
+            setErrorMessage(
+              formatErrorMessage(parsed.validationErrors, parsed.lastError, 'Purchase invoice creation failed.')
+            );
+            return;
+          }
+
+          if (eventName === 'done' || isTerminal) return;
+        }
+
+        if (done) return;
       }
-    } catch (err: unknown) {
-      const message =
-        err instanceof ApiRequestError
-          ? err.message
-          : err instanceof Error
-            ? err.message
-            : 'An unexpected error occurred.';
-      setErrorMessage(message);
     } finally {
-      runningRef.current = false;
-      setIsRunning(false);
+      reader.cancel().catch(() => {});
     }
-  }, []);
+  }, [processSnapshot]);
 
-  useEffect(() => {
-    const stored = readStoredSubmitTask();
-    if (stored) {
-      void pollSubmitTask(stored.taskId, stored.startedAt);
-      return;
-    }
+  // Polling fallback — used when SSE is unavailable.
+  const pollSubmitTask = useCallback(async (
+    submitId: string,
+    accessToken: string | undefined,
+    startedAt: number,
+  ): Promise<void> => {
+    while (true) {
+      const res = await getPurchaseInvoiceSubmitTask(submitId, accessToken);
+      const isTerminal = processSnapshot(res);
+      if (isTerminal) return;
 
-    const pending = readStoredSubmitRequest();
-    if (!pending) return;
-
-    // If we refreshed before receiving a taskId, retry the submit once using the same requestId.
-    // This relies on backend-side idempotency keyed by requestId.
-    void (async () => {
-      if (Date.now() - pending.startedAt > POLL_TIMEOUT_MS) {
-        writeStoredSubmitRequest(null);
+      if (Date.now() - startedAt > POLL_TIMEOUT_MS) {
+        setErrorMessage('The operation timed out. Please check the invoice list to see if it was created.');
         return;
       }
 
-      setIsOpen(true);
-      setIsRunning(true);
-      setStatus((current) => current ?? 'queued');
-      setErrorMessage(null);
+      await new Promise((r) => setTimeout(r, POLL_INTERVAL_MS));
+    }
+  }, [processSnapshot]);
 
+  // Starts listening via SSE, falls back to polling on failure.
+  const listenToSubmit = useCallback(async (
+    submitId: string,
+    accessToken: string | undefined,
+    startedAt: number,
+  ): Promise<void> => {
+    // Create a new AbortController so dismiss() can cancel the SSE connection.
+    const ctrl = new AbortController();
+    listenAbortRef.current = ctrl;
+
+    setIsRunning(true);
+    setIsOpen(true);
+    setStatus((c) => c ?? 'queued');
+    setErrorMessage(null);
+
+    try {
       try {
-        const createRes = await submitPurchaseInvoice(pending.request);
-        const submitTaskId = (createRes as any).taskId as string | undefined;
-
-        if (!submitTaskId) {
-          setStatus('succeeded');
-          setResult(createRes as any);
-          writeStoredSubmitRequest(null);
-          return;
-        }
-
-        writeStoredSubmitTask({ taskId: submitTaskId, startedAt: pending.startedAt });
-        writeStoredSubmitRequest(null);
-        await pollSubmitTask(submitTaskId, pending.startedAt);
-      } catch (err: unknown) {
-        const message =
-          err instanceof ApiRequestError
-            ? err.message
-            : err instanceof Error
-              ? err.message
-              : 'An unexpected error occurred.';
-        setStatus('failed');
-        setErrorMessage(message);
-      } finally {
-        setIsRunning(false);
+        await listenSSE(submitId, accessToken, startedAt, ctrl.signal);
+      } catch {
+        // If the user dismissed / aborted, don't fall back to polling.
+        if (ctrl.signal.aborted) return;
+        // SSE not available or failed before connecting — fall back to polling
+        await pollSubmitTask(submitId, accessToken, startedAt);
       }
-    })();
-  }, [pollSubmitTask]);
+    } catch (err) {
+      if (!ctrl.signal.aborted) {
+        setErrorMessage(
+          err instanceof ApiRequestError ? err.message :
+          err instanceof Error ? err.message :
+          'An unexpected error occurred.'
+        );
+      }
+    } finally {
+      runningRef.current = false;
+      setIsRunning(false);
+      if (listenAbortRef.current === ctrl) listenAbortRef.current = null;
+    }
+  }, [listenSSE, pollSubmitTask]);
 
-  const startSubmit = useCallback(async (request: PurchaseInvoiceSubmitRequest) => {
+  const startSubmit = useCallback(async (request: PurchaseInvoiceSubmitRequest, options?: { silent?: boolean }) => {
     if (runningRef.current) return;
     runningRef.current = true;
     setIsRunning(true);
-    setIsOpen(true);
+    if (!options?.silent) setIsOpen(true);
     setStatus('queued');
     setTask(null);
-    setResult(null);
     setErrorMessage(null);
 
     const startedAt = Date.now();
-    writeStoredSubmitRequest({ request, startedAt });
+    const { accessToken } = request;
 
     try {
-      // Step 1: POST /purchase-invoice/submit
       const createRes = await submitPurchaseInvoice(request);
-      const submitTaskId = (createRes as any).taskId as string | undefined;
+      const submitId = createRes.submitId;
 
-      if (!submitTaskId) {
-        // Synchronous result (no task)
-        setStatus('succeeded');
-        setResult(createRes as any);
-        writeStoredSubmitRequest(null);
+      if (!submitId) {
+        setStatus('completed');
         return;
       }
 
-      // Persist task so a page refresh can resume polling / show final state.
-      writeStoredSubmitTask({ taskId: submitTaskId, startedAt });
-      writeStoredSubmitRequest(null);
-    } catch (err: unknown) {
+      writeStored({ submitId, accessToken, startedAt });
+      // Keep runningRef = true so dismiss() stays blocked while listening.
+      // listenToSubmit's finally block resets runningRef and isRunning.
+      void listenToSubmit(submitId, accessToken, startedAt);
+    } catch (err) {
       const message =
-        err instanceof ApiRequestError
-          ? err.message
-          : err instanceof Error
-            ? err.message
-            : 'An unexpected error occurred.';
+        err instanceof ApiRequestError ? err.message :
+        err instanceof Error ? err.message :
+        'An unexpected error occurred.';
       setStatus('failed');
       setErrorMessage(message);
-    } finally {
       runningRef.current = false;
       setIsRunning(false);
     }
-    const stored = readStoredSubmitTask();
-    if (stored) {
-      void pollSubmitTask(stored.taskId, stored.startedAt);
-    }
-  }, []);
+  }, [listenToSubmit]);
 
   const stepInfo = useMemo<SubmitStepInfo | null>(() => {
     if (!status) return null;
     return getStepInfo(status);
   }, [status]);
 
-  const value = useMemo<SubmitContextValue>(
-    () => ({
-      isOpen,
-      status,
-      stepInfo,
-      task,
-      result,
-      errorMessage,
-      isRunning,
-      startSubmit,
-      dismiss,
-    }),
-    [isOpen, status, stepInfo, task, result, errorMessage, isRunning, startSubmit, dismiss],
-  );
+  const value = useMemo<SubmitContextValue>(() => ({
+    isOpen, status, stepInfo, task, result: null, errorMessage, isRunning, startSubmit, dismiss,
+  }), [isOpen, status, stepInfo, task, errorMessage, isRunning, startSubmit, dismiss]);
 
   return <SubmitContext.Provider value={value}>{children}</SubmitContext.Provider>;
 }
 
 export function useSubmit() {
   const ctx = useContext(SubmitContext);
-  if (!ctx) {
-    throw new Error('useSubmit must be used within SubmitProvider.');
-  }
+  if (!ctx) throw new Error('useSubmit must be used within SubmitProvider.');
   return ctx;
 }

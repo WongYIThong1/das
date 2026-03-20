@@ -1,10 +1,9 @@
-'use client';
+import { cookies } from 'next/headers';
+import RegisterRoutePage from '../../../components/RegisterRoutePage';
 
-import { useRouter } from 'next/navigation';
-import { AuthPage } from '../../../components/AuthPage';
+export default async function RegisterPage() {
+  const cookieStore = await cookies();
+  const inviteCode = cookieStore.get('activeInviteCode')?.value;
 
-export default function RegisterPage() {
-  const router = useRouter();
-
-  return <AuthPage mode="register" onNavigate={(path) => router.push(path)} />;
+  return <RegisterRoutePage inviteCode={inviteCode} />;
 }

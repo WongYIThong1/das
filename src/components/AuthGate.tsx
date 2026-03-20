@@ -1,7 +1,7 @@
 'use client';
 
 import type { ReactNode } from 'react';
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { usePathname, useRouter } from 'next/navigation';
 import { useAuth } from './AuthProvider';
 
@@ -16,9 +16,12 @@ function isStandaloneAuthPath(pathname: string) {
 export default function AuthGate({ children }: { children: ReactNode }) {
   const router = useRouter();
   const pathname = usePathname() ?? '/';
-  const { authStatus, isAuthenticated, pendingAuthFlow, refreshProfile } = useAuth();
+  const { authStatus, isAuthenticated, pendingAuthFlow, clearPendingAuthFlow, refreshProfile } = useAuth();
   const [progress, setProgress] = useState(0);
   const [showLoader, setShowLoader] = useState(true);
+  const skipLoader = isStandaloneAuthPath(pathname);
+  // Guard against clearing the pending flow more than once per mount.
+  const clearedStaleFlowRef = useRef(false);
 
   useEffect(() => {
     if (authStatus === 'unknown') {
@@ -27,6 +30,11 @@ export default function AuthGate({ children }: { children: ReactNode }) {
   }, [authStatus, refreshProfile]);
 
   useEffect(() => {
+    if (skipLoader) {
+      setShowLoader(false);
+      return;
+    }
+
     const target = authStatus === 'unknown' ? 28 : authStatus === 'loading' ? 84 : 100;
     const duration = authStatus === 'unknown' ? 260 : authStatus === 'loading' ? 900 : 420;
     const startValue = progress;
@@ -64,19 +72,34 @@ export default function AuthGate({ children }: { children: ReactNode }) {
         window.clearTimeout(hideTimer);
       }
     };
-  }, [authStatus]);
+  }, [authStatus, skipLoader]);
 
   useEffect(() => {
     if (authStatus === 'unknown' || authStatus === 'loading') {
       return;
     }
 
-    if (pendingAuthFlow && pathname !== '/totp' && pathname !== '/toptp') {
+    // If the user is already authenticated but a stale pendingAuthFlow was
+    // restored from the backend (e.g. from a previous incomplete login), clear
+    // it silently. Without this, the gate bounces: /home → /totp → /home → …
+    if (isAuthenticated && pendingAuthFlow && !clearedStaleFlowRef.current) {
+      clearedStaleFlowRef.current = true;
+      void clearPendingAuthFlow();
+      return;
+    }
+
+    // Only redirect to TOTP when the user is NOT yet authenticated.
+    if (pendingAuthFlow && !isAuthenticated && pathname !== '/totp' && pathname !== '/toptp') {
       router.replace('/totp');
       return;
     }
 
     if (isPublicAuthPath(pathname)) {
+      if (isAuthenticated) {
+        router.replace('/home');
+        return;
+      }
+
       if (isStandaloneAuthPath(pathname)) {
         return;
       }
@@ -90,7 +113,7 @@ export default function AuthGate({ children }: { children: ReactNode }) {
     if (!isAuthenticated) {
       router.replace('/login');
     }
-  }, [authStatus, isAuthenticated, pathname, pendingAuthFlow, router]);
+  }, [authStatus, clearPendingAuthFlow, isAuthenticated, pathname, pendingAuthFlow, router]);
 
   if (showLoader) {
     return (

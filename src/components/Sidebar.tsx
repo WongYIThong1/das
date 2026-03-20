@@ -16,7 +16,7 @@ import {
 import { motion, AnimatePresence } from 'motion/react';
 import { LogoutModal } from './LogoutModal';
 import { useAuth } from './AuthProvider';
-import { logout } from '../lib/auth-api';
+import { logoutSession } from '../lib/auth-api';
 
 const routeByItem: Record<string, string> = {
   'purchase-invoice': '/purchase-invoice',
@@ -72,12 +72,12 @@ export function Sidebar() {
   const handleLogout = async () => {
     setIsLogoutDialogOpen(false);
     try {
-      await logout();
+      await logoutSession();
     } catch {
-      // Mock mode keeps logout non-blocking.
+      // Keep logout non-blocking when the backend is unavailable.
     }
-    clearAuthState();
-    router.push('/purchase-invoice');
+    await clearAuthState();
+    router.push('/login');
   };
   const menuGroups = [
     {

@@ -1,7 +1,6 @@
-import { mockProfile } from './mock-data';
-
 export { ApiRequestError } from './api-error';
 import { ApiRequestError } from './api-error';
+import type { PendingLoginAuthFlow, PendingRegisterAuthFlow } from './auth';
 
 export type AuthApiError = {
   error?: string;
@@ -9,46 +8,66 @@ export type AuthApiError = {
 };
 
 export type RegisterStartRequest = {
-  username: string;
+  name: string;
   email: string;
   password: string;
-  accountbookKey?: string;
+  inviteCode: string;
 };
 
 export type RegisterStartResponse = {
-  registrationTicket: string;
-  nextAction: 'totp_enroll';
+  ok: true;
+  userId?: number;
+  bookId?: string;
+  mfaRequired: true;
+};
+
+export type MfaSetupRequest = {
+  email: string;
+  password: string;
+};
+
+export type MfaSetupResponse = {
+  ok: true;
+  secret: string;
+  status: 'pending';
+  otpauth: string;
+  qrPngBase64: string;
+};
+
+export type MfaConfirmRequest = {
+  email: string;
+  password: string;
+  totpCode: string;
 };
 
 export type LoginStartRequest = {
-  identifier: string;
+  email: string;
   password: string;
 };
 
 export type LoginStartResponse = {
-  loginTicket: string;
-  requires2fa: boolean;
-  requires2faEnrollment?: boolean;
-  mfaType: 'totp';
+  error: 'mfa_required';
+  mfaToken?: string;
+  expiresIn?: number;
 };
 
-export type TotpEnrollResponse = {
-  factorId: string;
-  qrCodeSvg: string;
-  secret: string;
-  uri: string;
+export type CompleteLoginMfaRequest = {
+  mfaToken: string;
+  totpCode: string;
 };
 
-export type VerifyRegisterTotpRequest = {
-  registrationTicket: string;
-  factorId: string;
-  code: string;
+export type SessionUser = {
+  id: number | string;
+  email: string;
+  name: string;
+  bookId: string;
 };
 
-export type VerifyLoginTotpRequest = {
-  loginTicket: string;
-  factorId?: string;
-  code: string;
+export type AuthSessionResponse = {
+  accessToken: string;
+  tokenType: 'Bearer';
+  expiresIn: number;
+  user: SessionUser;
 };
 
 export type ProfileResponse = {
@@ -61,81 +80,200 @@ export type ProfileResponse = {
   mfaEnabled: boolean;
 };
 
-function delay(ms: number) {
-  return new Promise((resolve) => window.setTimeout(resolve, ms));
-}
-
 function ensureValue(value: string, message: string) {
   if (!value.trim()) {
     throw new ApiRequestError(message, 400);
   }
 }
 
+function getErrorMessage(code: string | undefined, fallback: string) {
+  switch (code) {
+    case 'invalid_request':
+      return 'Please complete all required fields.';
+    case 'invalid_invite_code':
+      return 'This invite link is invalid or has expired.';
+    case 'email_exists':
+      return 'This email address is already registered.';
+    case 'username_exists':
+      return 'This username is already taken.';
+    case 'invalid_credentials':
+      return 'The email or password is incorrect.';
+    case 'invalid_mfa_code':
+      return 'The OTP code is invalid. Please try again.';
+    case 'mfa_not_setup':
+      return 'MFA setup was not found. Please restart registration.';
+    case 'mfa_already_enabled':
+      return 'MFA is already enabled for this account.';
+    case 'invalid_refresh_token':
+      return 'Your session has expired. Please sign in again.';
+    case 'service_unavailable':
+      return 'The authentication service is temporarily unavailable.';
+    default:
+      return fallback;
+  }
+}
+
+async function parseError(response: Response, fallback: string) {
+  const payload = (await response.json().catch(() => null)) as AuthApiError | null;
+  throw new ApiRequestError(getErrorMessage(payload?.error, fallback), response.status);
+}
+
+async function postJson<TResponse>(path: string, payload: unknown, fallback: string) {
+  const response = await fetch(path, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+    },
+    credentials: 'include',
+    body: JSON.stringify(payload),
+  });
+
+  if (!response.ok) {
+    await parseError(response, fallback);
+  }
+
+  return (await response.json()) as TResponse;
+}
+
+async function postWithoutBody<TResponse>(path: string, fallback: string) {
+  const response = await fetch(path, {
+    method: 'POST',
+    credentials: 'include',
+  });
+
+  if (!response.ok) {
+    await parseError(response, fallback);
+  }
+
+  return (await response.json()) as TResponse;
+}
+
+export function mapSessionUserToProfile(user: SessionUser): ProfileResponse {
+  return {
+    userId: String(user.id),
+    username: user.name,
+    email: user.email,
+    bookId: user.bookId,
+    company: 'My365Biz Workspace',
+    status: 'active',
+    mfaEnabled: true,
+  };
+}
+
 export async function registerStart(payload: RegisterStartRequest) {
-  await delay(180);
-  ensureValue(payload.username, 'Username is required.');
+  ensureValue(payload.name, 'Username is required.');
   ensureValue(payload.email, 'Email is required.');
   ensureValue(payload.password, 'Password is required.');
-  return {
-    registrationTicket: 'mock-registration-ticket',
-    nextAction: 'totp_enroll',
-  } satisfies RegisterStartResponse;
+  ensureValue(payload.inviteCode, 'Invite code is required.');
+
+  return postJson<RegisterStartResponse>('/api/auth/register', payload, 'Unable to create the account right now.');
 }
 
-export async function registerTotpEnroll(registrationTicket: string) {
-  await delay(180);
-  ensureValue(registrationTicket, 'Registration ticket is required.');
-  return {
-    factorId: 'mock-factor-id',
-    qrCodeSvg: '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 120 120"><rect width="120" height="120" fill="white"/><rect x="12" y="12" width="24" height="24" fill="black"/><rect x="84" y="12" width="24" height="24" fill="black"/><rect x="12" y="84" width="24" height="24" fill="black"/></svg>',
-    secret: 'MOCK-TOTP-SECRET',
-    uri: 'otpauth://totp/365BIZ:demo?secret=MOCKTOTPSECRET&issuer=365BIZ',
-  } satisfies TotpEnrollResponse;
+export async function registerMfaSetup(payload: MfaSetupRequest) {
+  ensureValue(payload.email, 'Email is required.');
+  ensureValue(payload.password, 'Password is required.');
+
+  return postJson<MfaSetupResponse>('/api/auth/mfa/setup', payload, 'Unable to prepare MFA setup right now.');
 }
 
-export async function registerTotpVerify(payload: VerifyRegisterTotpRequest) {
-  await delay(180);
-  ensureValue(payload.registrationTicket, 'Registration ticket is required.');
-  ensureValue(payload.code, 'Verification code is required.');
-  return mockProfile;
+export async function registerMfaConfirm(payload: MfaConfirmRequest) {
+  ensureValue(payload.email, 'Email is required.');
+  ensureValue(payload.password, 'Password is required.');
+  ensureValue(payload.totpCode, 'Verification code is required.');
+
+  return postJson<{ ok: true }>('/api/auth/mfa/confirm', payload, 'Unable to verify the OTP code right now.');
+}
+
+export async function storePendingRegisterAuth(flow: PendingRegisterAuthFlow) {
+  return postJson<{ ok: true; pendingAuthFlow: PendingRegisterAuthFlow }>(
+    '/api/auth/pending/register',
+    flow,
+    'Unable to save registration state right now.'
+  );
 }
 
 export async function loginStart(payload: LoginStartRequest) {
-  await delay(180);
-  ensureValue(payload.identifier, 'Email or username is required.');
+  ensureValue(payload.email, 'Email is required.');
   ensureValue(payload.password, 'Password is required.');
-  return {
-    loginTicket: 'mock-login-ticket',
-    requires2fa: true,
-    requires2faEnrollment: false,
-    mfaType: 'totp',
-  } satisfies LoginStartResponse;
+
+  const response = await fetch('/api/auth/login', {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+    },
+    credentials: 'include',
+    body: JSON.stringify(payload),
+  });
+
+  const data = (await response.json().catch(() => null)) as AuthApiError & LoginStartResponse | null;
+  if (response.status === 401 && data?.error === 'mfa_required') {
+    return {
+      error: 'mfa_required',
+      mfaToken: data.mfaToken,
+      expiresIn: data.expiresIn,
+    } satisfies LoginStartResponse;
+  }
+
+  if (!response.ok) {
+    throw new ApiRequestError(
+      getErrorMessage(data?.error, 'Unable to start sign in right now.'),
+      response.status
+    );
+  }
+
+  throw new ApiRequestError('Unexpected login response from the server.', response.status);
 }
 
-export async function loginTotpEnroll(loginTicket: string) {
-  await delay(180);
-  ensureValue(loginTicket, 'Login ticket is required.');
-  return {
-    factorId: 'mock-factor-id',
-    qrCodeSvg: '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 120 120"><rect width="120" height="120" fill="white"/><rect x="12" y="12" width="24" height="24" fill="black"/><rect x="84" y="12" width="24" height="24" fill="black"/><rect x="12" y="84" width="24" height="24" fill="black"/></svg>',
-    secret: 'MOCK-TOTP-SECRET',
-    uri: 'otpauth://totp/365BIZ:demo?secret=MOCKTOTPSECRET&issuer=365BIZ',
-  } satisfies TotpEnrollResponse;
+export async function storePendingLoginAuth(flow: PendingLoginAuthFlow) {
+  return postJson<{ ok: true; pendingAuthFlow: PendingLoginAuthFlow }>(
+    '/api/auth/pending/login',
+    flow,
+    'Unable to save sign-in state right now.'
+  );
 }
 
-export async function loginTotpVerify(payload: VerifyLoginTotpRequest) {
-  await delay(180);
-  ensureValue(payload.loginTicket, 'Login ticket is required.');
-  ensureValue(payload.code, 'Verification code is required.');
-  return mockProfile;
+export async function getPendingAuthFlow() {
+  const response = await fetch('/api/auth/pending', {
+    method: 'GET',
+    credentials: 'include',
+  });
+
+  if (response.status === 404) {
+    return null;
+  }
+
+  if (!response.ok) {
+    await parseError(response, 'Unable to restore authentication state right now.');
+  }
+
+  const payload = (await response.json()) as { pendingAuthFlow: PendingRegisterAuthFlow | PendingLoginAuthFlow };
+  return payload.pendingAuthFlow;
 }
 
-export async function getProfile() {
-  await delay(120);
-  return mockProfile;
+export async function clearPendingAuthFlowRemote() {
+  const response = await fetch('/api/auth/pending/clear', {
+    method: 'POST',
+    credentials: 'include',
+  });
+
+  if (!response.ok) {
+    await parseError(response, 'Unable to clear authentication state right now.');
+  }
+
+  return (await response.json()) as { ok: true };
 }
 
-export async function logout() {
-  await delay(100);
-  return null;
+export async function completeLoginMfa(payload: CompleteLoginMfaRequest) {
+  ensureValue(payload.mfaToken, 'MFA token is required.');
+  ensureValue(payload.totpCode, 'Verification code is required.');
+
+  return postJson<AuthSessionResponse>('/api/auth/mfa', payload, 'Unable to verify the OTP code right now.');
+}
+
+export async function refreshSession() {
+  return postWithoutBody<AuthSessionResponse>('/api/auth/refresh', 'Unable to restore your session right now.');
+}
+
+export async function logoutSession() {
+  return postWithoutBody<{ ok: true }>('/api/auth/logout', 'Unable to sign out right now.');
 }

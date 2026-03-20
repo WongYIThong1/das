@@ -8,15 +8,17 @@ import { useAuth } from './AuthProvider';
 import {
   ApiRequestError,
   loginStart,
-  loginTotpEnroll,
   registerStart,
-  registerTotpEnroll,
+  registerMfaSetup,
+  storePendingLoginAuth,
+  storePendingRegisterAuth,
 } from '../lib/auth-api';
 
 type AuthMode = 'login' | 'register';
 
 interface AuthPageProps {
   mode: AuthMode;
+  inviteCode?: string;
   onNavigate: (path: string) => void;
 }
 
@@ -61,9 +63,15 @@ function buildEmailAddress(localValue: string, selectedDomain: string) {
   return `${trimmedValue}@${selectedDomain}`;
 }
 
-export function AuthPage({ mode, onNavigate }: AuthPageProps) {
+export function AuthPage({ mode, inviteCode, onNavigate }: AuthPageProps) {
   const content = copyByMode[mode];
-  const { clearAuthState, setPendingAuthFlow } = useAuth();
+  const {
+    activeInviteCode,
+    clearActiveInviteCode,
+    clearPendingAuthFlow,
+    setActiveInviteCode,
+    setPendingAuthFlow,
+  } = useAuth();
   const [isDomainOpen, setIsDomainOpen] = useState(false);
   const [selectedDomain, setSelectedDomain] = useState('my365.net');
   const availableDomains = ['my365.net', 'my365biz.app'];
@@ -91,6 +99,17 @@ export function AuthPage({ mode, onNavigate }: AuthPageProps) {
   useEffect(() => {
     setIsDomainOpen(false);
   }, [mode]);
+
+  useEffect(() => {
+    if (mode !== 'register') {
+      clearActiveInviteCode();
+      return;
+    }
+
+    if (inviteCode?.trim()) {
+      setActiveInviteCode(inviteCode.trim());
+    }
+  }, [clearActiveInviteCode, inviteCode, mode, setActiveInviteCode]);
 
   useEffect(() => {
     const handlePointerDown = (event: MouseEvent) => {
@@ -125,6 +144,10 @@ export function AuthPage({ mode, onNavigate }: AuthPageProps) {
       toast.error('Username, email, and password are required.');
       return;
     } else {
+      if (!activeInviteCode?.trim()) {
+        toast.error('Please use a valid invite link to create your account.');
+        return;
+      }
       if (!usernamePattern.test(username.trim())) {
         toast.error('Username must be 3-32 characters and only use letters, numbers, dot, underscore, or dash.');
         return;
@@ -145,58 +168,56 @@ export function AuthPage({ mode, onNavigate }: AuthPageProps) {
 
     setIsSubmitting(true);
     try {
-      clearAuthState();
+      await clearPendingAuthFlow();
 
       if (mode === 'register') {
         const registerResponse = await registerStart({
-          username: username.trim(),
+          name: username.trim(),
+          email,
+          password,
+          inviteCode: activeInviteCode,
+        });
+        const enrollResponse = await registerMfaSetup({
           email,
           password,
         });
-        const enrollResponse = await registerTotpEnroll(registerResponse.registrationTicket);
-        setPendingAuthFlow({
+        const pendingResponse = await storePendingRegisterAuth({
           mode: 'register',
-          ticket: registerResponse.registrationTicket,
-          factorId: enrollResponse.factorId,
-          requiresEnrollment: true,
-          qrCodeSvg: enrollResponse.qrCodeSvg,
+          requiresEnrollment: registerResponse.mfaRequired,
           secret: enrollResponse.secret,
-          uri: enrollResponse.uri,
+          otpauth: enrollResponse.otpauth,
+          qrImageSrc: `data:image/png;base64,${enrollResponse.qrPngBase64}`,
+          email,
+          password,
+          inviteCode: activeInviteCode,
           identifierOrEmail: email,
         });
+        setPendingAuthFlow(pendingResponse.pendingAuthFlow);
       } else {
         const loginResponse = await loginStart({
-          identifier: email,
+          email,
           password,
         });
 
-        if (!loginResponse.requires2fa) {
-          throw new Error('The backend did not request TOTP for this login.');
-        }
+        console.info('loginResponse', loginResponse);
 
-        if (loginResponse.requires2faEnrollment) {
-          const enrollResponse = await loginTotpEnroll(loginResponse.loginTicket);
-          setPendingAuthFlow({
-            mode: 'login',
-            ticket: loginResponse.loginTicket,
-            factorId: enrollResponse.factorId,
-            requiresEnrollment: true,
-            qrCodeSvg: enrollResponse.qrCodeSvg,
-            secret: enrollResponse.secret,
-            uri: enrollResponse.uri,
-            identifierOrEmail: email,
-          });
-        } else {
-          setPendingAuthFlow({
-            mode: 'login',
-            ticket: loginResponse.loginTicket,
-            requiresEnrollment: false,
-            identifierOrEmail: email,
-          });
+        if (!loginResponse.mfaToken) {
+          throw new ApiRequestError(
+            `Login response: ${JSON.stringify(loginResponse)}`,
+            401
+          );
         }
+        const pendingResponse = await storePendingLoginAuth({
+          mode: 'login',
+          requiresEnrollment: false,
+          identifierOrEmail: email,
+          mfaToken: loginResponse.mfaToken,
+          expiresIn: loginResponse.expiresIn,
+        });
+        setPendingAuthFlow(pendingResponse.pendingAuthFlow);
       }
 
-      toast.success('Continue on the TOTP page.');
+      toast.success(mode === 'register' ? 'Account created. Continue to OTP setup.' : 'Continue on the TOTP page.');
       onNavigate('/totp');
     } catch (error) {
       toast.error(getErrorMessage(error, 'Unable to start authentication. Please try again.'));
@@ -364,13 +385,18 @@ export function AuthPage({ mode, onNavigate }: AuthPageProps) {
             </motion.button>
           </form>
 
-          <button
-            type="button"
-            onClick={() => onNavigate(content.swapHref)}
-            className="mt-4 w-full text-center text-sm font-medium text-zinc-500 transition hover:text-zinc-900"
-          >
-            {content.swapText}
-          </button>
+          {mode === 'register' && (
+            <button
+              type="button"
+              onClick={() => {
+                clearActiveInviteCode();
+                onNavigate(content.swapHref);
+              }}
+              className="mt-4 w-full text-center text-sm font-medium text-zinc-500 transition hover:text-zinc-900"
+            >
+              {content.swapText}
+            </button>
+          )}
         </motion.section>
       </div>
     </div>

@@ -1,0 +1,14 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(grep -r \"EventSource\\\\|ReadableStream\\\\|stream\\\\|SSE\" /c/Users/wongy/Desktop/das/src/lib/*.ts)",
+      "Bash(find \"C:\\\\Users\\\\wongy\\\\Desktop\\\\das/src/app/\\(app\\)/purchase-invoice\" -type f -name \"*.tsx\")",
+      "Bash(find \"C:/Users/wongy/Desktop/das/src/app/\\(app\\)/purchase-invoice\" -type f)",
+      "Bash(find \"C:/Users/wongy/Desktop/das/src/app/\\(app\\)/purchase-invoice/group\" -type f)",
+      "Bash(npx next:*)",
+      "Bash(mkdir -p \"C:/Users/wongy/Desktop/das/src/app/api/purchase-invoice/draft/[draftId]/submit\")",
+      "Bash(mkdir -p \"C:/Users/wongy/Desktop/das/src/app/api/purchase-invoice/submits/[submitId]\")",
+      "Bash(npx tsc:*)"
+    ]
+  }
+}
