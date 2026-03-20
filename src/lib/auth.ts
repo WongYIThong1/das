@@ -9,7 +9,7 @@ export type PendingRegisterAuthFlow = {
   requiresEnrollment: true;
   identifierOrEmail: string;
   email: string;
-  password: string;
+  password?: string;
   inviteCode?: string;
   secret?: string;
   otpauth?: string;
@@ -20,7 +20,7 @@ export type PendingLoginAuthFlow = {
   mode: 'login';
   requiresEnrollment: false;
   identifierOrEmail: string;
-  mfaToken: string;
+  mfaToken?: string;
   expiresIn?: number;
 };
 

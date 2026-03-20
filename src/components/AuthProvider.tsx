@@ -16,7 +16,6 @@ import { registerAuthStore } from '../lib/auth-fetch';
 
 const AuthContext = createContext<AuthContextValue | null>(null);
 const ACTIVE_INVITE_STORAGE_KEY = 'auth.activeInviteCode';
-const PENDING_AUTH_STORAGE_KEY = 'auth.pendingAuthFlow';
 
 function parseJwtExpiry(accessToken: string) {
   const payloadSegment = accessToken.split('.')[1];
@@ -42,24 +41,6 @@ function resolveAccessTokenExpiry(session: { accessToken: string; expiresIn?: nu
   return parseJwtExpiry(session.accessToken);
 }
 
-function readPendingAuthFlow(): PendingAuthFlow | null {
-  if (typeof window === 'undefined') {
-    return null;
-  }
-
-  const rawValue = window.sessionStorage.getItem(PENDING_AUTH_STORAGE_KEY);
-  if (!rawValue) {
-    return null;
-  }
-
-  try {
-    return JSON.parse(rawValue) as PendingAuthFlow;
-  } catch {
-    window.sessionStorage.removeItem(PENDING_AUTH_STORAGE_KEY);
-    return null;
-  }
-}
-
 function readActiveInviteCode() {
   if (typeof window === 'undefined') {
     return null;
@@ -73,7 +54,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   const [authStatus, setAuthStatus] = useState<AuthStatus>('unknown');
   const [accessToken, setAccessTokenState] = useState<string | null>(null);
   const [accessTokenExpiresAt, setAccessTokenExpiresAt] = useState<number | null>(null);
-  const [pendingAuthFlow, setPendingAuthFlowState] = useState<PendingAuthFlow | null>(() => readPendingAuthFlow());
+  const [pendingAuthFlow, setPendingAuthFlowState] = useState<PendingAuthFlow | null>(null);
   const [activeInviteCode, setActiveInviteCodeState] = useState<string | null>(() => readActiveInviteCode());
   const authRevisionRef = useRef(0);
   // Ref keeps the latest token accessible synchronously from the auth store
@@ -105,9 +86,6 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
 
   const clearPendingAuthFlow = useCallback(async () => {
     setPendingAuthFlowState(null);
-    if (typeof window !== 'undefined') {
-      window.sessionStorage.removeItem(PENDING_AUTH_STORAGE_KEY);
-    }
     try {
       await clearPendingAuthFlowRemote();
     } catch {
@@ -128,7 +106,6 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     setPendingAuthFlowState(null);
     setActiveInviteCodeState(null);
     if (typeof window !== 'undefined') {
-      window.sessionStorage.removeItem(PENDING_AUTH_STORAGE_KEY);
       window.sessionStorage.removeItem(ACTIVE_INVITE_STORAGE_KEY);
     }
     try {
@@ -232,19 +209,6 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
       document.removeEventListener('visibilitychange', handleVisibilityChange);
     };
   }, [accessTokenExpiresAt, authStatus, refreshProfile]);
-
-  useEffect(() => {
-    if (typeof window === 'undefined') {
-      return;
-    }
-
-    if (pendingAuthFlow) {
-      window.sessionStorage.setItem(PENDING_AUTH_STORAGE_KEY, JSON.stringify(pendingAuthFlow));
-      return;
-    }
-
-    window.sessionStorage.removeItem(PENDING_AUTH_STORAGE_KEY);
-  }, [pendingAuthFlow]);
 
   useEffect(() => {
     if (typeof window === 'undefined') {

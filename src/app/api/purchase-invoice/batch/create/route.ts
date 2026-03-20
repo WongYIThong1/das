@@ -1,4 +1,8 @@
 import { NextResponse } from 'next/server';
+import {
+  MAX_UPLOAD_BATCH_FILES,
+  validateInvoiceUploadFile,
+} from '../../../../../lib/upload-validation';
 
 function getBackendBaseUrl() {
   const baseUrl = process.env.BACKEND_BASE_URL?.trim();
@@ -15,9 +19,24 @@ export async function POST(request: Request) {
 
   try {
     const incoming = await request.formData();
+    const files = incoming.getAll('file');
+    if (files.length === 0) {
+      return NextResponse.json({ error: 'missing_file' }, { status: 400 });
+    }
+    if (files.length > MAX_UPLOAD_BATCH_FILES) {
+      return NextResponse.json({ error: 'too_many_files' }, { status: 400 });
+    }
+
+    for (const fileEntry of files) {
+      const validationError = validateInvoiceUploadFile(fileEntry);
+      if (validationError) {
+        return NextResponse.json({ error: validationError }, { status: 400 });
+      }
+    }
+
     const form = new FormData();
-    for (const [key, value] of incoming.entries()) {
-      form.append(key, value);
+    for (const fileEntry of files) {
+      form.append('file', fileEntry);
     }
     const response = await fetch(`${baseUrl}/user/purchase-invoice/batch/create`, {
       method: 'POST',

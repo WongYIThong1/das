@@ -20,5 +20,9 @@ export async function POST(request: Request) {
   });
   cookieStore.delete(REGISTER_PENDING_COOKIE);
 
-  return NextResponse.json({ ok: true, pendingAuthFlow: payload }, { status: 200 });
+  const pendingAuthFlow = {
+    ...payload,
+    mfaToken: undefined,
+  };
+  return NextResponse.json({ ok: true, pendingAuthFlow }, { status: 200 });
 }

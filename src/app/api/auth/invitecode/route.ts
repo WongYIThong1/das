@@ -1,6 +1,42 @@
 import { NextResponse } from 'next/server';
 import { verifyInviteCode } from '../../../../lib/invitecode-server';
 
+function redirectTo(request: Request, pathname: string) {
+  const url = new URL(request.url);
+  url.pathname = pathname;
+  url.search = '';
+  return NextResponse.redirect(url);
+}
+
+async function handleInviteCode(request: Request, inviteCode: string) {
+  const normalizedInviteCode = inviteCode.trim();
+
+  if (!normalizedInviteCode) {
+    return redirectTo(request, '/login');
+  }
+
+  const result = await verifyInviteCode(normalizedInviteCode);
+  if (!result.ok) {
+    return redirectTo(request, '/login');
+  }
+
+  const response = redirectTo(request, '/register');
+  response.cookies.set('activeInviteCode', normalizedInviteCode, {
+    httpOnly: true,
+    sameSite: 'lax',
+    secure: process.env.NODE_ENV === 'production',
+    path: '/',
+    maxAge: 60 * 60,
+  });
+  return response;
+}
+
+export async function GET(request: Request) {
+  const url = new URL(request.url);
+  const inviteCode = url.searchParams.get('inviteCode')?.trim() ?? '';
+  return handleInviteCode(request, inviteCode);
+}
+
 export async function POST(request: Request) {
   const payload = (await request.json().catch(() => null)) as { inviteCode?: string } | null;
   const inviteCode = payload?.inviteCode?.trim() ?? '';
@@ -11,7 +47,15 @@ export async function POST(request: Request) {
 
   const result = await verifyInviteCode(inviteCode);
   if (result.ok) {
-    return NextResponse.json({ ok: true }, { status: 200 });
+    const response = NextResponse.json({ ok: true }, { status: 200 });
+    response.cookies.set('activeInviteCode', inviteCode, {
+      httpOnly: true,
+      sameSite: 'lax',
+      secure: process.env.NODE_ENV === 'production',
+      path: '/',
+      maxAge: 60 * 60,
+    });
+    return response;
   }
 
   if (result.status === 400) {

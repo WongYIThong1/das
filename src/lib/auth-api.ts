@@ -35,8 +35,8 @@ export type MfaSetupResponse = {
 };
 
 export type MfaConfirmRequest = {
-  email: string;
-  password: string;
+  email?: string;
+  password?: string;
   totpCode: string;
 };
 
@@ -52,7 +52,7 @@ export type LoginStartResponse = {
 };
 
 export type CompleteLoginMfaRequest = {
-  mfaToken: string;
+  mfaToken?: string;
   totpCode: string;
 };
 
@@ -177,8 +177,6 @@ export async function registerMfaSetup(payload: MfaSetupRequest) {
 }
 
 export async function registerMfaConfirm(payload: MfaConfirmRequest) {
-  ensureValue(payload.email, 'Email is required.');
-  ensureValue(payload.password, 'Password is required.');
   ensureValue(payload.totpCode, 'Verification code is required.');
 
   return postJson<{ ok: true }>('/api/auth/mfa/confirm', payload, 'Unable to verify the OTP code right now.');
@@ -264,7 +262,6 @@ export async function clearPendingAuthFlowRemote() {
 }
 
 export async function completeLoginMfa(payload: CompleteLoginMfaRequest) {
-  ensureValue(payload.mfaToken, 'MFA token is required.');
   ensureValue(payload.totpCode, 'Verification code is required.');
 
   return postJson<AuthSessionResponse>('/api/auth/mfa', payload, 'Unable to verify the OTP code right now.');
