@@ -93,7 +93,7 @@ const POLL_TIMEOUT_MS = 180_000;
 
 const SUBMIT_STORAGE_KEY = 'pi:submit:task';
 
-type StoredTask = { submitId: string; accessToken?: string; startedAt: number };
+type StoredTask = { submitId: string; startedAt: number };
 
 function readStored(): StoredTask | null {
   if (typeof window === 'undefined') return null;
@@ -103,7 +103,7 @@ function readStored(): StoredTask | null {
     const p = JSON.parse(raw) as Partial<StoredTask>;
     if (typeof p.submitId !== 'string' || !p.submitId) return null;
     if (typeof p.startedAt !== 'number') return null;
-    return { submitId: p.submitId, accessToken: p.accessToken, startedAt: p.startedAt };
+    return { submitId: p.submitId, startedAt: p.startedAt };
   } catch { return null; }
 }
 
@@ -264,7 +264,7 @@ export function SubmitProvider({ children }: { children: React.ReactNode }) {
         return;
       }
 
-      writeStored({ submitId, accessToken, startedAt });
+      writeStored({ submitId, startedAt });
       // Keep runningRef = true so dismiss() stays blocked while listening.
       // listenToSubmit's finally block resets runningRef and isRunning.
       void listenToSubmit(submitId, accessToken, startedAt);

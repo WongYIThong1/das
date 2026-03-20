@@ -49,12 +49,70 @@ export type PurchaseInvoiceSubmitDetailItem = {
   autoCreateStock?: PurchaseInvoiceAutoCreateStock;
 };
 
-export type PurchaseInvoiceSubmitRequest = {
+export type PurchaseInvoiceSubmitRequestV2 = {
   taskId: string;
   accessToken?: string;
   header: PurchaseInvoiceSubmitHeader;
   details: PurchaseInvoiceSubmitDetailItem[];
+  createMissing?: PurchaseInvoiceSubmitRequestLegacy['createMissing'];
 };
+
+export type PurchaseInvoiceSubmitPayload = {
+  creditorCode: string;
+  purchaseAgent: string;
+  supplierInvoiceNo: string;
+  docDate: string;
+  currencyCode: string;
+  currencyRate: number | string;
+  displayTerm: string;
+  purchaseLocation?: string;
+  description: string;
+  details: Array<{
+    itemCode: string;
+    description: string;
+    desc2?: string;
+    qty: number | string;
+    unitPrice: number | string;
+    amount: number | string;
+    uom: string;
+    taxCode: string;
+    accNo: string;
+    itemGroup?: string;
+  }>;
+};
+
+export type PurchaseInvoiceCreateMissingItemPayload = {
+  itemCode: string;
+  description: string;
+  itemGroup?: string;
+  itemType?: string;
+  salesUom?: string;
+  purchaseUom?: string;
+  reportUom?: string;
+  stockControl?: boolean;
+  hasSerialNo?: boolean;
+  hasBatchNo?: boolean;
+  isActive?: boolean;
+  taxCode?: string;
+  purchaseTaxCode?: string;
+  uomConfirmed?: boolean;
+};
+
+export type PurchaseInvoiceSubmitRequestLegacy = {
+  requestId: string;
+  previewTaskId: string;
+  accessToken?: string;
+  payload: PurchaseInvoiceSubmitPayload;
+  createMissing?: {
+    items?: Array<{
+      line: number;
+      enabled: boolean;
+      payload: PurchaseInvoiceCreateMissingItemPayload;
+    }>;
+  };
+};
+
+export type PurchaseInvoiceSubmitRequest = PurchaseInvoiceSubmitRequestV2 | PurchaseInvoiceSubmitRequestLegacy;
 
 // ─── Response types ────────────────────────────────────────────────────────────
 
@@ -67,10 +125,23 @@ export type PurchaseInvoiceSubmitTaskStatus =
   | 'completed'
   | 'failed';
 
-export type PurchaseInvoiceSubmitCreateResponse = {
+export type PurchaseInvoiceSubmitEnvelope = {
   submitTaskId: string;
+  taskId?: string;
   status: string;
+  requestId?: string;
+  httpStatus?: number;
+  success?: boolean;
+  message?: string;
+  purchaseInvoice?: {
+    success?: boolean;
+    message?: string;
+  };
+  stockCreates?: Array<{ success?: boolean }>;
+  creditorCreate?: { success?: boolean };
 };
+
+export type PurchaseInvoiceSubmitCreateResponse = PurchaseInvoiceSubmitEnvelope;
 
 export type PurchaseInvoiceSubmitValidationError = {
   lineNo?: number;
@@ -106,47 +177,53 @@ export type PurchaseInvoiceSubmitResponse = {
 
 // ─── API functions ─────────────────────────────────────────────────────────────
 
+function isSubmitRequestV2(request: PurchaseInvoiceSubmitRequest): request is PurchaseInvoiceSubmitRequestV2 {
+  return 'taskId' in request;
+}
+
 export async function submitPurchaseInvoice(
   request: PurchaseInvoiceSubmitRequest
-): Promise<PurchaseInvoiceSubmitCreateResponse> {
-  const { taskId, accessToken, header, details } = request;
+): Promise<PurchaseInvoiceSubmitEnvelope> {
+  const accessToken = request.accessToken;
 
   const headers: Record<string, string> = {
     'Content-Type': 'application/json',
   };
   if (accessToken) headers['Authorization'] = `Bearer ${accessToken}`;
 
-  const body = JSON.stringify({
-    taskId,
-    draft: {
-      header: {
-        creditorCode: header.creditorCode,
-        docDate: header.docDate,
-        supplierInvoiceNo: header.supplierInvoiceNo,
-        currencyCode: header.currencyCode,
-        currencyRate: header.currencyRate,
-        description: header.description || 'PURCHASE INVOICE',
-        externalLink: header.externalLink,
-        displayTerm: header.displayTerm,
-        invAddr1: header.invAddr1 ?? '',
-        invAddr2: header.invAddr2 ?? '',
-        invAddr3: header.invAddr3 ?? '',
-        invAddr4: header.invAddr4 ?? '',
-      },
-      details: details.map((d) => ({
-        itemCode: d.itemCode,
-        description: d.description,
-        uom: d.uom,
-        qty: d.qty,
-        unitPrice: d.unitPrice,
-        amount: d.amount,
-        taxCode: d.taxCode,
-        accNo: d.accNo,
-        isAutoCreate: d.isAutoCreate,
-        ...(d.isAutoCreate && d.autoCreateStock ? { autoCreateStock: d.autoCreateStock } : {}),
-      })),
-    },
-  });
+  const body = isSubmitRequestV2(request)
+    ? JSON.stringify({
+        taskId: request.taskId,
+        draft: {
+          header: {
+            creditorCode: request.header.creditorCode,
+            docDate: request.header.docDate,
+            supplierInvoiceNo: request.header.supplierInvoiceNo,
+            currencyCode: request.header.currencyCode,
+            currencyRate: request.header.currencyRate,
+            description: request.header.description || 'PURCHASE INVOICE',
+            externalLink: request.header.externalLink,
+            displayTerm: request.header.displayTerm,
+            invAddr1: request.header.invAddr1 ?? '',
+            invAddr2: request.header.invAddr2 ?? '',
+            invAddr3: request.header.invAddr3 ?? '',
+            invAddr4: request.header.invAddr4 ?? '',
+          },
+          details: request.details.map((d) => ({
+            itemCode: d.itemCode,
+            description: d.description,
+            uom: d.uom,
+            qty: d.qty,
+            unitPrice: d.unitPrice,
+            amount: d.amount,
+            taxCode: d.taxCode,
+            accNo: d.accNo,
+            isAutoCreate: d.isAutoCreate,
+            ...(d.isAutoCreate && d.autoCreateStock ? { autoCreateStock: d.autoCreateStock } : {}),
+          })),
+        },
+      })
+    : JSON.stringify(request);
 
   const response = await authFetch('/api/purchase-invoice/submit', {
     method: 'POST',
@@ -162,10 +239,28 @@ export async function submitPurchaseInvoice(
     );
   }
 
-  const data = (await response.json()) as { submitTaskId?: string; status?: string };
+  const data = (await response.json()) as {
+    submitTaskId?: string;
+    taskId?: string;
+    status?: string;
+    success?: boolean;
+    message?: string;
+    purchaseInvoice?: { success?: boolean; message?: string };
+    stockCreates?: Array<{ success?: boolean }>;
+    creditorCreate?: { success?: boolean };
+  };
+  const submitTaskId = data.submitTaskId ?? data.taskId ?? '';
   return {
-    submitTaskId: data.submitTaskId ?? '',
+    submitTaskId,
+    taskId: data.taskId,
     status: data.status ?? 'queued',
+    requestId: !isSubmitRequestV2(request) ? request.requestId : undefined,
+    httpStatus: response.status,
+    success: data.success,
+    message: data.message,
+    purchaseInvoice: data.purchaseInvoice,
+    stockCreates: data.stockCreates,
+    creditorCreate: data.creditorCreate,
   };
 }
 
@@ -225,4 +320,45 @@ export async function getPurchaseInvoiceSubmitTask(
     lastError: data.lastError,
     warnings: data.warnings,
   };
+}
+
+export async function waitForPurchaseInvoiceSubmit(
+  submitTaskId: string,
+  accessToken?: string,
+  options?: { timeoutMs?: number; intervalMs?: number }
+): Promise<PurchaseInvoiceSubmitEnvelope> {
+  const timeoutMs = options?.timeoutMs ?? 180_000;
+  const intervalMs = options?.intervalMs ?? 1_500;
+  const startedAt = Date.now();
+
+  while (true) {
+    const task = await getPurchaseInvoiceSubmitTask(submitTaskId, accessToken);
+    if (task.status === 'completed' || task.status === 'failed' || task.status === 'stock_failed') {
+      return {
+        submitTaskId: task.submitTaskId ?? task.submitId,
+        taskId: task.taskId,
+        status: task.status,
+        httpStatus: task.status === 'completed' ? 201 : 200,
+        success: task.status === 'completed',
+        message: task.lastError,
+        purchaseInvoice: {
+          success: task.status === 'completed',
+          message: task.lastError,
+        },
+      };
+    }
+
+    if (Date.now() - startedAt > timeoutMs) {
+      return {
+        submitTaskId: task.submitTaskId ?? task.submitId ?? submitTaskId,
+        taskId: task.taskId,
+        status: task.status,
+        httpStatus: 202,
+        success: false,
+        message: 'submit_timeout',
+      };
+    }
+
+    await new Promise((resolve) => setTimeout(resolve, intervalMs));
+  }
 }

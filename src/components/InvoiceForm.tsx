@@ -13,7 +13,14 @@ import { ApiRequestError } from '../lib/auth-api';
 import { safeExternalHref } from '@/lib/safe-url';
 import type { PreviewMatch, PreviewMatchStatus, PreviewProposedNewItem, PreviewWarningCode, PurchaseInvoicePreviewDetail, PurchaseInvoicePreviewPayload, PurchaseInvoicePreviewResponse } from '../lib/purchase-invoice-create-api';
 import { getPurchaseInvoiceAgentOptions, getPurchaseInvoiceCreditorOptions, getPurchaseInvoiceStockOptions, type PurchaseInvoiceAgentOption, type PurchaseInvoiceCreditorOption, type PurchaseInvoiceStockOption } from '../lib/purchase-invoice-picker-api';
-import { submitPurchaseInvoice, waitForPurchaseInvoiceSubmit, type PurchaseInvoiceCreateMissingItemPayload, type PurchaseInvoiceSubmitEnvelope, type PurchaseInvoiceSubmitPayload, type PurchaseInvoiceSubmitRequest } from '../lib/purchase-invoice-submit-api';
+import {
+  submitPurchaseInvoice,
+  waitForPurchaseInvoiceSubmit,
+  type PurchaseInvoiceCreateMissingItemPayload,
+  type PurchaseInvoiceSubmitEnvelope,
+  type PurchaseInvoiceSubmitPayload,
+  type PurchaseInvoiceSubmitRequestLegacy,
+} from '../lib/purchase-invoice-submit-api';
 
 interface CreateInvoiceProps {
   preview: PurchaseInvoicePreviewResponse;
@@ -221,9 +228,9 @@ function buildItemCreatePayload(detail: DraftDetail, match: PreviewMatch | undef
   };
 }
 
-function buildSubmitRequest(preview: PurchaseInvoicePreviewResponse, draft: DraftPayload, requestId: string): PurchaseInvoiceSubmitRequest {
+function buildSubmitRequest(preview: PurchaseInvoicePreviewResponse, draft: DraftPayload, requestId: string): PurchaseInvoiceSubmitRequestLegacy {
   const payload = buildFinalPayload(draft);
-  const createMissing: NonNullable<PurchaseInvoiceSubmitRequest['createMissing']> = {};
+  const createMissing: NonNullable<PurchaseInvoiceSubmitRequestLegacy['createMissing']> = {};
 
 
 

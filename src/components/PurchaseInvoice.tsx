@@ -51,6 +51,7 @@ import { getPurchaseInvoiceList } from '../lib/purchase-invoice-api';
 
 interface EditableInvoice {
   id: string; // This will be the supplierInvoiceNo (DocKey)
+  rowKey: string;
   supplierInvoiceNo: string;
   creditorName: string;
   purchaseAgent: string;
@@ -125,6 +126,7 @@ const defaultFilters: FilterDraft = {
 function mapToEditableInvoice(item: PurchaseInvoiceListItem): EditableInvoice {
   return {
     id: item.supplierInvoiceNo,
+    rowKey: item.supplierInvoiceNo,
     supplierInvoiceNo: item.supplierInvoiceNo,
     creditorName: item.supplier,
     purchaseAgent: item.agent,
@@ -259,8 +261,6 @@ export function PurchaseInvoice() {
       const allItemsDone = items.every((it) => terminal.has(mapBatchStatus(it.status ?? '')));
       const isDone = (groupAnalysisDone && !submitInProgress) || allItemsDone;
 
-      console.log('[syncGroupSnapshot] groupStatus:', data.status, 'allItemsDone:', allItemsDone);
-
       setBatchNow(Date.now());
       setBatchItems((prev) => {
         const snapMap = new Map(items.map((it) => [it.itemId ?? '', it]));
@@ -342,14 +342,12 @@ export function PurchaseInvoice() {
                   };
                   // Mark when replay phase ends
                   if (ev.eventType === 'replay_completed') {
-                    console.log('[SSE] replay_completed — now processing live events');
                     replayDone = true;
                     dataLine = '';
                     continue;
                   }
                   // During replay, skip all events — snapshot is the source of truth
                   if (!replayDone) {
-                    console.log('[SSE] skipping replay event:', ev.eventType, ev.status);
                     dataLine = '';
                     continue;
                   }
@@ -364,7 +362,6 @@ export function PurchaseInvoice() {
                   }
                   if (ev.eventType === 'item_status_changed' && ev.itemId) {
                     const newPhase = mapBatchStatus(ev.status ?? '');
-                    console.log('[SSE] live item_status_changed:', ev.itemId, ev.status, '→', newPhase);
                     setBatchNow(Date.now());
                     setBatchItems((prev) => {
                       const next = prev.map((item) =>
@@ -907,11 +904,7 @@ export function PurchaseInvoice() {
     setDeleteConfirmOpen(true);
   };
 
-  const handleDeleteConfirm = () => {
-    if (invoiceToDelete) {
-      console.log('Delete invoice:', invoiceToDelete.id);
-    }
-  };
+  const handleDeleteConfirm = () => {};
 
   const handleApplyFilters = () => {
     setAppliedFilters({ ...draftFilters });
@@ -923,7 +916,21 @@ export function PurchaseInvoice() {
     setSelectedSortLabel(sortOptions[0].label);
   };
 
-  const renderedInvoices = useMemo(() => items.map(mapToEditableInvoice), [items]);
+  const renderedInvoices = useMemo(
+    () =>
+      items.map((item, index) => {
+        const invoice = mapToEditableInvoice(item);
+        const fallbackBase =
+          invoice.id ||
+          invoice.docNo ||
+          `${invoice.creditorName}-${invoice.docDate}-${invoice.amount}-${invoice.netTotal}`;
+        return {
+          ...invoice,
+          rowKey: `${fallbackBase}::${index}`,
+        };
+      }),
+    [items]
+  );
 
   const renderTable = () => {
     if (isInitialLoading) {
@@ -1080,7 +1087,7 @@ export function PurchaseInvoice() {
           </thead>
           <tbody>
             {renderedInvoices.map((invoice) => (
-              <tr key={invoice.id} className="group">
+              <tr key={invoice.rowKey} className="group">
                 <td className="pl-6 pr-3 py-1.5 text-zinc-600">
                   <div className="flex items-center gap-1.5">
                     <FileDigit size={12} className="text-zinc-400" />

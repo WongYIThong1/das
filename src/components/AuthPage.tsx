@@ -199,13 +199,8 @@ export function AuthPage({ mode, inviteCode, onNavigate }: AuthPageProps) {
           password,
         });
 
-        console.info('loginResponse', loginResponse);
-
         if (!loginResponse.mfaToken) {
-          throw new ApiRequestError(
-            `Login response: ${JSON.stringify(loginResponse)}`,
-            401
-          );
+          throw new ApiRequestError('MFA challenge is missing from the login response.', 401);
         }
         const pendingResponse = await storePendingLoginAuth({
           mode: 'login',
