@@ -20,35 +20,19 @@ export async function POST(request: Request) {
   const upstreamUrl = `${baseUrl}/user/purchase-invoice/create`;
 
   try {
-    const incoming = await request.formData();
-    const form = new FormData();
-    const fileEntry = incoming.get('file');
-    if (!fileEntry) {
-      return NextResponse.json({ error: 'missing_file' }, { status: 400 });
-    }
-    form.append('file', fileEntry);
-
+    const body = await request.text();
     const response = await fetch(upstreamUrl, {
       method: 'POST',
-      headers: { Authorization: authorization },
-      body: form,
+      headers: {
+        Authorization: authorization,
+        'Content-Type': 'application/json',
+      },
+      body,
     });
 
-    const text = await response.text();
-    let data: unknown = null;
-    try { data = JSON.parse(text); } catch { /* non-JSON */ }
-
-    if (!response.ok) {
-      const err = (data as any) ?? {};
-      return NextResponse.json(
-        { error: err.error ?? err.message ?? (text.slice(0, 200) || 'upstream_error') },
-        { status: response.status }
-      );
-    }
-
+    const data = (await response.json().catch(() => null)) as unknown;
     return NextResponse.json(data, { status: response.status });
-  } catch (err) {
-    console.error('[upload] proxy error:', err);
+  } catch {
     return NextResponse.json({ error: 'service_unavailable' }, { status: 503 });
   }
 }

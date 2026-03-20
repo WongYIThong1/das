@@ -1,4 +1,5 @@
 import { ApiRequestError } from './auth-api';
+import { authFetch } from './auth-fetch';
 
 export type PreviewTaskStatus = 'queued' | 'ocr_processing' | 'analyzing' | 'succeeded' | 'failed' | 'canceled';
 export type PreviewMatchStatus = 'matched' | 'review' | 'unmatched';
@@ -152,6 +153,7 @@ export type PurchaseInvoicePreviewTaskResponse = {
   // The backend may return these early (even before `result`) so the UI can
   // offer "Download original" while the preview task is still running.
   externalLink?: string;
+  imageUrl?: string;
   file?: PurchaseInvoicePreviewFile;
   result?: PurchaseInvoicePreviewResponse;
   error?: string;
@@ -202,16 +204,27 @@ type DraftHeader = {
   docDate?: string;
   displayTerm?: string;
   location?: string;
+  // Currency: API returns currencyCode; keep currency for compat
   currency?: string;
+  currencyCode?: string;
   currencyRate?: number | string;
   displayRate?: number | string;
   description?: string;
+  // External download link stored in the header
+  externalLink?: string;
+  // Address: new API uses invAddr1-4
+  invAddr1?: string;
+  invAddr2?: string;
+  invAddr3?: string;
+  invAddr4?: string;
+  // Legacy address fields (keep for compat)
   creditorAddress?: string;
   creditorAddressLines?: string[];
 };
 
 type DraftDetailItem = {
   itemCode?: string;
+  itemGroup?: string;
   accNo?: string;
   qty?: number | string;
   uom?: string;
@@ -220,10 +233,16 @@ type DraftDetailItem = {
   description?: string;
   desc2?: string;
   taxCode?: string;
-  itemGroup?: string;
+  // New API fields for auto-create stock
+  isAutoCreate?: boolean;
+  autoCreateStatus?: string;   // 'ready' | 'blocked'
+  autoCreateReason?: string;   // 'item_not_found'
+  autoCreateStock?: Record<string, unknown>;
+  // Legacy fields (keep for compat)
   isNewItem?: boolean;
-  autoCreateStock?: boolean;
   stockProposal?: Record<string, unknown>;
+  // New API: boolean flag; old API: array of warning objects
+  warning?: boolean;
   warnings?: unknown[];
 };
 
@@ -234,19 +253,30 @@ type DraftApiResponse = {
   bookId?: string;
   status?: string;
   header?: DraftHeader;
-  warnings?: unknown[];          // header / global warnings
+  warnings?: unknown[];
   confidenceSummary?: unknown;
   details?: DraftDetailItem[];
+  docScore?: number;
+  docWarning?: boolean;
 };
 
-// Map API warning codes to UI warning codes (the UI was written before the API stabilised)
+// Map API warning codes to UI warning codes
 const WARNING_CODE_MAP: Record<string, string> = {
-  invoice_number_missing: 'missing_invoice_number',
-  doc_date_missing: 'missing_invoice_date',
-  creditor_fallback_cash_purchase: 'creditor_not_matched',
-  creditor_low_confidence: 'creditor_needs_review',
-  item_code_unmatched: 'item_not_matched',
-  stock_proposed_new: 'item_needs_review',
+  // Invoice number
+  invoice_number_missing:                'missing_invoice_number',
+  // Doc date
+  doc_date_missing:                      'missing_invoice_date',
+  // Creditor
+  creditor_fallback_cash_purchase:       'creditor_not_matched',
+  creditor_defaulted_cash_purchase:      'creditor_not_matched',
+  creditor_low_confidence:               'creditor_needs_review',
+  creditor_match_warning:                'creditor_needs_review',
+  creditor_master_warning:               'creditor_needs_review',
+  // Item
+  item_code_unmatched:                   'item_not_matched',
+  item_match_warning:                    'item_needs_review',
+  stock_proposed_new:                    'item_needs_review',
+  detail_amount_mismatch_warning:        'item_needs_review',
 };
 
 function normalizeWarningCode(code: string): string {
@@ -265,7 +295,8 @@ function normalizeWarning(w: unknown): unknown {
 function mapDraftToPreviewResponse(
   draft: DraftApiResponse,
   taskId: string,
-  fileName: string
+  fileName: string,
+  externalLink?: string,
 ): PurchaseInvoicePreviewResponse {
   const header = draft.header ?? {};
   const rawDetails = draft.details ?? [];
@@ -283,6 +314,20 @@ function mapDraftToPreviewResponse(
     itemGroup: d.itemGroup ?? '',
   }));
 
+  // Address: new API uses invAddr1-invAddr4; fall back to creditorAddressLines/creditorAddress
+  const addrParts = [header.invAddr1, header.invAddr2, header.invAddr3, header.invAddr4]
+    .map((s) => s?.trim())
+    .filter(Boolean) as string[];
+  const creditorAddressLines = addrParts.length > 0
+    ? addrParts
+    : header.creditorAddressLines ?? (header.creditorAddress ? [header.creditorAddress] : []);
+
+  // Currency: new API uses currencyCode; fall back to currency
+  const currencyCode = header.currencyCode ?? header.currency ?? '';
+
+  // External download link: header.externalLink or caller-provided
+  const resolvedExternalLink = header.externalLink ?? externalLink ?? '';
+
   // Flatten warnings: header-level first (no line), then per-detail (1-based line).
   const warnings: PreviewWarning[] = [];
 
@@ -296,8 +341,13 @@ function mapDraftToPreviewResponse(
     }
   });
 
-  // Per-detail warnings — use 1-based line index to match the UI's `line={index + 1}`
+  // Per-detail warnings — 1-based line index to match the UI's `line={index + 1}`
   rawDetails.forEach((d, i) => {
+    // New API: boolean flag
+    if (d.warning === true) {
+      warnings.push({ code: 'item_needs_review', line: i + 1 } satisfies PreviewWarningObject);
+    }
+    // Legacy: array of warning objects
     (d.warnings ?? []).forEach((w) => {
       const n = normalizeWarning(w);
       if (typeof n === 'string') {
@@ -308,25 +358,39 @@ function mapDraftToPreviewResponse(
     });
   });
 
-  // Map isNewItem / stockProposal into the matches.items structure so the existing
+  // Map isAutoCreate / autoCreateStock into the matches.items structure so the existing
   // UI logic for "new item proposals" continues to work unchanged.
   const matchItems: PreviewMatch[] = rawDetails.map((d) => {
+    // Support both new API (isAutoCreate/autoCreateStock) and legacy (isNewItem/stockProposal)
+    const isNew = d.isAutoCreate ?? d.isNewItem ?? false;
+    const sp = (d.autoCreateStock ?? d.stockProposal ?? {}) as Record<string, unknown>;
+
     let normalizedProposal: PreviewProposedNewItem | null = null;
-    if (d.isNewItem) {
-      const sp = (d.stockProposal ?? {}) as Record<string, unknown>;
+    if (isNew && Object.keys(sp).length > 0) {
       normalizedProposal = {
         ...sp,
-        // API returns itemCode; type uses itemCodeSuggestion
-        itemCodeSuggestion: (sp.itemCode as string) ?? (sp.itemCodeSuggestion as string) ?? '',
-        // API uses uppercase UOM field names; type uses lowercase
-        baseUom: (sp.baseUOM as string) ?? (sp.baseUom as string) ?? '',
-        salesUom: (sp.salesUOM as string) ?? (sp.salesUom as string) ?? '',
-        purchaseUom: (sp.purchaseUOM as string) ?? (sp.purchaseUom as string) ?? '',
-        reportUom: (sp.reportUOM as string) ?? (sp.reportUom as string) ?? '',
+        // Backend returns PascalCase or camelCase — normalize to camelCase for the UI
+        itemCodeSuggestion:
+          (sp.ItemCode as string) ?? (sp.itemCode as string) ??
+          (sp.itemCodeSuggestion as string) ?? d.itemCode ?? '',
+        description:
+          (sp.Description as string) ?? (sp.description as string) ?? d.description ?? '',
+        itemGroup:
+          (sp.ItemGroup as string) ?? (sp.itemGroup as string) ?? d.itemGroup ?? '',
+        baseUom:
+          (sp.BaseUOM as string) ?? (sp.BaseUom as string) ?? (sp.baseUom as string) ?? 'UNIT',
+        salesUom:
+          (sp.SalesUOM as string) ?? (sp.SalesUom as string) ?? (sp.salesUom as string) ?? 'UNIT',
+        purchaseUom:
+          (sp.PurchaseUOM as string) ?? (sp.PurchaseUom as string) ?? (sp.purchaseUom as string) ?? 'UNIT',
+        reportUom:
+          (sp.ReportUOM as string) ?? (sp.ReportUom as string) ?? (sp.reportUom as string) ?? 'UNIT',
+        taxCode: (sp.TaxCode as string) ?? (sp.taxCode as string) ?? undefined,
+        purchaseTaxCode: (sp.PurchaseTaxCode as string) ?? (sp.purchaseTaxCode as string) ?? undefined,
       } as PreviewProposedNewItem;
     }
     return {
-      status: d.isNewItem ? 'unmatched' : 'matched',
+      status: isNew ? 'unmatched' : 'matched',
       proposedNewItem: normalizedProposal,
     };
   });
@@ -340,13 +404,14 @@ function mapDraftToPreviewResponse(
       creditorCode: header.creditorCode ?? '',
       purchaseAgent: header.purchaseAgent ?? '',
       supplierInvoiceNo: header.supplierInvoiceNo ?? '',
+      externalLink: resolvedExternalLink,
       docDate: header.docDate ?? '',
-      currencyCode: header.currency ?? '',
-      currencyRate: header.currencyRate ?? 1,
+      currencyCode,
+      currencyRate: header.currencyRate ?? header.displayRate ?? 1,
       displayTerm: header.displayTerm ?? '',
-      purchaseLocation: header.location ?? 'HQ',
+      purchaseLocation: header.location ?? '',
       description: header.description ?? 'PURCHASE INVOICE',
-      creditorAddressLines: header.creditorAddressLines ?? (header.creditorAddress ? [header.creditorAddress] : []),
+      creditorAddressLines,
       details,
     },
     warnings,
@@ -358,18 +423,26 @@ function mapDraftToPreviewResponse(
 
 function mapBackendStatus(status: string): PreviewTaskStatus {
   switch (status) {
+    case 'queued':
+    case 'uploaded':
+    case 'processing':
+    case 'fileserver_uploading':
+      return 'queued';
     case 'ocr_started':
     case 'ocr_completed':
+    case 'ocrprocessing':
       return 'ocr_processing';
     case 'draft_ready':
+    case 'aianalyzing':
       return 'analyzing';
+    case 'reanalyze_queued':
+    case 'reanalyzing':
+      return 'ocr_processing';
     case 'completed':
+    case 'completed_with_warnings':
       return 'succeeded';
     case 'failed':
       return 'failed';
-    case 'queued':
-    case 'uploaded':
-      return 'queued';
     default:
       return status as PreviewTaskStatus;
   }
@@ -381,14 +454,14 @@ export async function getCreditorOptions(
 ): Promise<PurchaseInvoicePickerPage<PurchaseInvoiceCreditorOption>> {
   const query = new URLSearchParams();
   if (params?.search?.trim()) query.set('search', params.search.trim());
-  if (params?.limit) query.set('limit', String(params.limit));
-  else if (params?.pageSize) query.set('limit', String(params.pageSize));
-  if (params?.cursor) query.set('cursor', params.cursor);
+  if (params?.page) query.set('page', String(params.page));
+  const ps = params?.pageSize ?? params?.limit ?? 20;
+  query.set('pageSize', String(ps));
 
   const headers: Record<string, string> = {};
   if (accessToken) headers['Authorization'] = `Bearer ${accessToken}`;
 
-  const response = await fetch(`/api/purchase-invoice/creditor?${query.toString()}`, {
+  const response = await authFetch(`/api/draft/creditor?${query.toString()}`, {
     method: 'GET',
     headers,
     cache: 'no-store',
@@ -400,30 +473,22 @@ export async function getCreditorOptions(
   }
 
   const data = (await response.json()) as {
-    items?: Array<{
-      code?: string;          // /user/purchase-invoice/creditor and /user/creditor
-      creditorCode?: string;  // alternate field name
-      companyName?: string;
-      currency?: string;
-      purchaseAgent?: string;
-      agent?: string;
-      active?: boolean;
-    }>;
+    items?: Array<{ creditorCode?: string; companyName?: string }>;
     total?: number;
-    totalCreditors?: number;
-    nextCursor?: string | null;
-    hasMore?: boolean;
+    page?: number;
+    pageSize?: number;
+    hasNext?: boolean;
   };
 
   const items = (data.items ?? []).map((c) => ({
-    accNo: c.creditorCode ?? c.code ?? '',
+    accNo: c.creditorCode ?? '',
     companyName: c.companyName ?? '',
-    currency: c.currency ?? '',
+    currency: '',
   }));
 
-  const pageSize = params?.pageSize ?? params?.limit ?? 20;
-  const total = data.total ?? data.totalCreditors ?? items.length;
-  const page = params?.page ?? 1;
+  const total = data.total ?? items.length;
+  const page = data.page ?? params?.page ?? 1;
+  const pageSize = data.pageSize ?? ps;
 
   return {
     page,
@@ -458,14 +523,14 @@ export async function getStockOptions(
 ): Promise<PurchaseInvoicePickerPage<PurchaseInvoiceStockOption>> {
   const query = new URLSearchParams();
   if (params?.search?.trim()) query.set('search', params.search.trim());
-  if (params?.limit) query.set('limit', String(params.limit));
-  else if (params?.pageSize) query.set('limit', String(params.pageSize));
-  if (params?.cursor) query.set('cursor', params.cursor);
+  if (params?.page) query.set('page', String(params.page));
+  const ps = params?.pageSize ?? params?.limit ?? 20;
+  query.set('pageSize', String(ps));
 
   const headers: Record<string, string> = {};
   if (accessToken) headers['Authorization'] = `Bearer ${accessToken}`;
 
-  const response = await fetch(`/api/purchase-invoice/stock?${query.toString()}`, {
+  const response = await authFetch(`/api/draft/stock?${query.toString()}`, {
     method: 'GET',
     headers,
     cache: 'no-store',
@@ -477,32 +542,22 @@ export async function getStockOptions(
   }
 
   const data = (await response.json()) as {
-    items?: Array<{
-      itemCode?: string;
-      code?: string;         // alternate field name
-      description?: string;
-      group?: string;
-      itemGroup?: string;    // alternate field name
-      type?: string;
-      baseUOM?: string;
-      control?: boolean;
-      active?: boolean;
-    }>;
+    items?: Array<{ itemCode?: string; description?: string }>;
     total?: number;
-    totalStocks?: number;
-    nextCursor?: string | null;
-    hasMore?: boolean;
+    page?: number;
+    pageSize?: number;
+    hasNext?: boolean;
   };
 
   const items = (data.items ?? []).map((s) => ({
-    itemCode: s.itemCode ?? s.code ?? '',
+    itemCode: s.itemCode ?? '',
     description: s.description ?? '',
-    group: s.group ?? s.itemGroup ?? '',
+    group: '',
   }));
 
-  const pageSize = params?.pageSize ?? params?.limit ?? 20;
-  const total = data.total ?? data.totalStocks ?? items.length;
-  const page = params?.page ?? 1;
+  const total = data.total ?? items.length;
+  const page = data.page ?? params?.page ?? 1;
+  const pageSize = data.pageSize ?? ps;
 
   return {
     page,
@@ -518,40 +573,33 @@ export async function getStockOptions(
 // ─── Detail fetchers ─────────────────────────────────────────────────────────
 
 export type CreditorDetail = {
-  code?: string;
   creditorCode?: string;
   companyName?: string;
-  purchaseAgent?: string;
+  taxCode?: string;
   displayTerm?: string;
-  currency?: string;
-  currencyCode?: string;
-  currencyRate?: number | string;
-  displayRate?: number | string;
-  creditorAddress?: string;
-  creditorAddressLines?: string[];
+  purchaseAgent?: string;
   address1?: string;
   address2?: string;
   address3?: string;
   address4?: string;
-  isActive?: boolean;
+  currencyCode?: string;
+  currencyRate?: number | string;
   active?: boolean;
 };
 
 export type StockDetail = {
   itemCode: string;
   description?: string;
+  description2?: string;
   desc2?: string;
   itemGroup?: string;
-  itemType?: string;
   taxCode?: string;
   purchaseTaxCode?: string;
   salesUOM?: string;
   purchaseUOM?: string;
   reportUOM?: string;
   baseUOM?: string;
-  accNo?: string;
-  stockControl?: boolean;
-  groupInfo?: Record<string, unknown>;
+  purchaseCode?: string;
   active?: boolean;
 };
 
@@ -559,18 +607,19 @@ export async function getCreditorDetail(
   code: string,
   accessToken?: string
 ): Promise<CreditorDetail | null> {
-  const query = new URLSearchParams({ code });
+  const query = new URLSearchParams({ creditorCode: code });
   const headers: Record<string, string> = {};
   if (accessToken) headers['Authorization'] = `Bearer ${accessToken}`;
 
-  const response = await fetch(`/api/purchase-invoice/creditor/detail?${query}`, {
+  const response = await authFetch(`/api/draft/creditor?${query}`, {
     method: 'GET',
     headers,
     cache: 'no-store',
   });
   if (!response.ok) return null;
-  const data = (await response.json()) as Record<string, unknown>;
-  return data as unknown as CreditorDetail;
+  const data = (await response.json()) as { creditor?: Record<string, unknown> };
+  if (!data.creditor) return null;
+  return data.creditor as unknown as CreditorDetail;
 }
 
 export async function getStockDetail(
@@ -581,14 +630,30 @@ export async function getStockDetail(
   const headers: Record<string, string> = {};
   if (accessToken) headers['Authorization'] = `Bearer ${accessToken}`;
 
-  const response = await fetch(`/api/purchase-invoice/stock/detail?${query}`, {
+  const response = await authFetch(`/api/draft/stock?${query}`, {
     method: 'GET',
     headers,
     cache: 'no-store',
   });
   if (!response.ok) return null;
-  const data = (await response.json()) as Record<string, unknown>;
-  return data as unknown as StockDetail;
+  const data = (await response.json()) as { stock?: Record<string, unknown> };
+  if (!data.stock) return null;
+  const s = data.stock;
+  return {
+    itemCode: (s.itemCode as string) ?? itemCode,
+    description: s.description as string | undefined,
+    description2: s.description2 as string | undefined,
+    desc2: (s.description2 as string | undefined) ?? (s.desc2 as string | undefined),
+    itemGroup: s.itemGroup as string | undefined,
+    taxCode: s.taxCode as string | undefined,
+    purchaseTaxCode: s.purchaseTaxCode as string | undefined,
+    salesUOM: s.salesUOM as string | undefined,
+    purchaseUOM: s.purchaseUOM as string | undefined,
+    reportUOM: s.reportUOM as string | undefined,
+    baseUOM: s.baseUOM as string | undefined,
+    purchaseCode: s.purchaseCode as string | undefined,
+    active: s.active as boolean | undefined,
+  };
 }
 
 export async function createPurchaseInvoicePreviewTask(
@@ -600,12 +665,12 @@ export async function createPurchaseInvoicePreviewTask(
   }
 
   const formData = new FormData();
-  formData.append('files', file);
+  formData.append('file', file);
 
   const headers: Record<string, string> = {};
   if (options?.accessToken) headers['Authorization'] = `Bearer ${options.accessToken}`;
 
-  const response = await fetch('/api/purchase-invoice/upload', {
+  const response = await authFetch('/api/purchase-invoice/upload', {
     method: 'POST',
     headers,
     body: formData,
@@ -617,16 +682,10 @@ export async function createPurchaseInvoicePreviewTask(
     throw new ApiRequestError(payload?.error ?? 'Upload failed.', response.status);
   }
 
-  const data = (await response.json()) as {
-    taskId?: string;
-    files?: Array<{ id?: string; status?: string }>;
-  };
-
-  const fileEntry = data.files?.[0];
-  const taskId = fileEntry?.id ?? data.taskId ?? '';
+  const data = (await response.json()) as { taskId?: string; status?: string };
 
   return {
-    taskId,
+    taskId: data.taskId ?? '',
     status: 'queued',
   };
 }
@@ -642,12 +701,10 @@ export async function getPurchaseInvoicePreviewTask(
   const headers: Record<string, string> = {};
   if (options?.accessToken) headers['Authorization'] = `Bearer ${options.accessToken}`;
 
-  const response = await fetch(`/api/purchase-invoice/tasks/${taskId}`, {
-    method: 'GET',
-    headers,
-    signal: options?.signal,
-    cache: 'no-store',
-  });
+  const response = await authFetch(
+    `/api/purchase-invoice/create/status?taskId=${encodeURIComponent(taskId)}`,
+    { method: 'GET', headers, signal: options?.signal, cache: 'no-store' }
+  );
 
   if (!response.ok) {
     const payload = (await response.json().catch(() => null)) as { error?: string } | null;
@@ -656,24 +713,41 @@ export async function getPurchaseInvoicePreviewTask(
 
   const data = (await response.json()) as {
     taskId?: string;
-    itemId?: string;
+    originalName?: string;
     status?: string;
-    draftId?: string;
-    downloadLink?: string;
-    ready?: boolean;
-    result?: PurchaseInvoicePreviewResponse;
+    fileServer?: { code?: string; link?: string; imageUrl?: string };
+    draft?: DraftApiResponse;
+    warnings?: unknown[];
     error?: string;
   };
 
   const mappedStatus = mapBackendStatus(data.status ?? '');
+  const externalLink = data.fileServer?.link ?? data.draft?.header?.externalLink;
+  const imageUrl = data.fileServer?.imageUrl;
+
+  // When completed, map the inline draft directly — no separate draft endpoint needed.
+  let result: PurchaseInvoicePreviewResponse | undefined;
+  if (mappedStatus === 'succeeded' && data.draft) {
+    // Merge top-level warnings into the draft so they surface in the UI
+    const mergedDraft: DraftApiResponse = {
+      ...data.draft,
+      warnings: [...(data.warnings ?? []), ...(data.draft.warnings ?? [])],
+    };
+    result = mapDraftToPreviewResponse(
+      mergedDraft,
+      taskId,
+      data.originalName ?? taskId,
+      externalLink,
+    );
+  }
 
   return {
-    taskId: data.taskId ?? data.itemId ?? taskId,
+    taskId: data.taskId ?? taskId,
     status: mappedStatus,
-    externalLink: data.downloadLink,
-    result: data.result,
+    externalLink,
+    imageUrl,
+    result,
     error: data.error,
-    draftId: data.draftId,
   };
 }
 
@@ -686,140 +760,40 @@ export async function reanalyzePurchaseInvoicePreviewTask(
   taskId: string,
   options?: { accessToken?: string }
 ): Promise<PurchaseInvoicePreviewTaskResponse> {
-  return getPurchaseInvoicePreviewTask(taskId, options);
-}
-
-// ─── Shared helper: fetch draft and map to preview response ──────────────────
-
-async function fetchDraftAndMap(
-  draftId: string,
-  taskId: string,
-  fileName: string,
-  accessToken?: string,
-): Promise<PurchaseInvoicePreviewResponse> {
   const headers: Record<string, string> = {};
-  if (accessToken) headers['Authorization'] = `Bearer ${accessToken}`;
-
-  const res = await fetch(`/api/purchase-invoice/draft/${draftId}`, {
-    method: 'GET',
-    headers,
-    cache: 'no-store',
-  });
-
-  if (!res.ok) {
-    const payload = (await res.json().catch(() => null)) as { error?: string } | null;
-    throw new ApiRequestError(payload?.error ?? 'Failed to load invoice draft.', res.status);
-  }
-
-  const draft = (await res.json()) as DraftApiResponse;
-  return mapDraftToPreviewResponse(draft, taskId, fileName);
-}
-
-// ─── SSE-based listener ───────────────────────────────────────────────────────
-
-async function waitForPreviewViaSSE(
-  taskId: string,
-  fileName: string,
-  options?: {
-    timeoutMs?: number;
-    onProgress?: (task: PurchaseInvoicePreviewTaskResponse) => void;
-    signal?: AbortSignal;
-    accessToken?: string;
-  },
-): Promise<PurchaseInvoicePreviewResponse> {
-  const timeoutMs = options?.timeoutMs ?? 120_000;
-  const startedAt = Date.now();
-
-  const headers: Record<string, string> = { Accept: 'text/event-stream' };
   if (options?.accessToken) headers['Authorization'] = `Bearer ${options.accessToken}`;
 
-  const response = await fetch(`/api/purchase-invoice/tasks/${taskId}/stream`, {
+  const response = await authFetch(`/api/purchase-invoice/task/${encodeURIComponent(taskId)}/reanalyze`, {
+    method: 'POST',
     headers,
-    signal: options?.signal,
   });
 
-  if (!response.ok || !response.body) throw new Error('sse_unavailable');
-
-  const reader = response.body.getReader();
-  const decoder = new TextDecoder();
-  let buf = '';
-
-  // Track last known values across events
-  let lastStatus: PreviewTaskStatus | null = null;
-  let lastDraftId: string | undefined;
-  let lastExternalLink: string | undefined;
-
-  const emitProgress = (status: PreviewTaskStatus, draftId?: string, externalLink?: string) => {
-    options?.onProgress?.({ taskId, status, draftId, externalLink });
-  };
-
-  try {
-    while (true) {
-      if (options?.signal?.aborted) throw new ApiRequestError('Preview cancelled.', 499);
-      if (Date.now() - startedAt > timeoutMs) throw new ApiRequestError('Preview timed out. Please try again.', 408);
-
-      const { done, value } = await reader.read();
-
-      if (value?.length) {
-        buf += decoder.decode(value, { stream: !done });
-      }
-      const blocks = buf.split('\n\n');
-      buf = done ? '' : (blocks.pop() ?? '');
-
-      for (const block of blocks) {
-        if (!block.trim()) continue;
-
-        let eventName = 'message';
-        let dataStr = '';
-        for (const line of block.split('\n')) {
-          if (line.startsWith('event:')) eventName = line.slice(6).trim();
-          else if (line.startsWith('data:')) dataStr = line.slice(5).trim();
-        }
-
-        if (!dataStr) continue;
-        let parsed: Record<string, unknown>;
-        try { parsed = JSON.parse(dataStr); } catch { continue; }
-
-        // Extract fields from the event payload
-        const rawStatus = (parsed.status as string) ?? '';
-        if (rawStatus) lastStatus = mapBackendStatus(rawStatus);
-        if (parsed.draftId) lastDraftId = parsed.draftId as string;
-        if (parsed.downloadLink) lastExternalLink = parsed.downloadLink as string;
-
-        if (lastStatus) emitProgress(lastStatus, lastDraftId, lastExternalLink);
-
-        // Terminal: success
-        if (lastStatus === 'succeeded' || eventName === 'item_ready') {
-          const draftId = lastDraftId ?? (parsed.draftId as string | undefined);
-          if (!draftId) throw new ApiRequestError('Preview completed but draft data is unavailable.', 500);
-          return await fetchDraftAndMap(draftId, taskId, fileName, options?.accessToken);
-        }
-
-        // Terminal: failure
-        if (lastStatus === 'failed' || eventName === 'item_failed') {
-          throw new ApiRequestError((parsed.error as string) || 'Preview failed.', 500);
-        }
-
-        // Stream closed by server at terminal state
-        if (eventName === 'done') {
-          if (lastStatus === 'succeeded') {
-            const draftId = lastDraftId;
-            if (!draftId) throw new ApiRequestError('Preview completed but draft data is unavailable.', 500);
-            return await fetchDraftAndMap(draftId, taskId, fileName, options?.accessToken);
-          }
-          if (lastStatus === 'failed') throw new ApiRequestError('Preview failed.', 500);
-          // done without known terminal status — fall through and let polling handle it
-          throw new Error('sse_done_unknown');
-        }
-      }
-
-      if (done) break;
-    }
-  } finally {
-    reader.cancel().catch(() => {});
+  if (!response.ok) {
+    const payload = (await response.json().catch(() => null)) as { error?: string } | null;
+    throw new ApiRequestError(payload?.error ?? 'Reanalyze failed.', response.status);
   }
 
-  throw new Error('sse_stream_ended');
+  // Reanalyze returns { taskId, status: 'reanalyze_queued' } — treat as queued/processing
+  return {
+    taskId,
+    status: 'ocr_processing',
+    externalLink: undefined,
+    imageUrl: undefined,
+    result: undefined,
+    error: undefined,
+  };
+}
+
+// ─── SSE stub: no SSE endpoint in the current API ────────────────────────────
+
+// eslint-disable-next-line @typescript-eslint/no-unused-vars
+async function waitForPreviewViaSSE(
+  _taskId: string,
+  _fileName: string,
+  _options?: unknown,
+): Promise<PurchaseInvoicePreviewResponse> {
+  // The current API has no SSE endpoint — always fall back to polling.
+  throw new Error('sse_unavailable');
 }
 
 // ─── Polling fallback ─────────────────────────────────────────────────────────
@@ -851,10 +825,10 @@ async function waitForPreviewViaPolling(
     if (task.status === 'canceled') throw new ApiRequestError('Preview cancelled.', 499);
 
     if (task.status === 'succeeded') {
+      // Draft is embedded inline in the status response via getPurchaseInvoicePreviewTask
       if (task.result) {
         return { taskId: task.taskId, draftId: task.draftId, ...task.result, sourceFileName: fileName };
       }
-      if (task.draftId) return await fetchDraftAndMap(task.draftId, task.taskId, fileName, options?.accessToken);
       throw new ApiRequestError('Preview completed but draft data is unavailable.', 500);
     }
 

@@ -8,47 +8,32 @@ function getBackendBaseUrl() {
 
 export async function POST(request: Request) {
   const baseUrl = getBackendBaseUrl();
-  if (!baseUrl) {
-    return NextResponse.json({ error: 'service_unavailable' }, { status: 503 });
-  }
+  if (!baseUrl) return NextResponse.json({ error: 'service_unavailable' }, { status: 503 });
 
   const authorization = request.headers.get('authorization')?.trim();
-  if (!authorization) {
-    return NextResponse.json({ error: 'invalid_request' }, { status: 400 });
-  }
+  if (!authorization) return NextResponse.json({ error: 'invalid_request' }, { status: 400 });
 
-  const upstreamUrl = `${baseUrl}/user/purchase-invoice/create`;
+  const { searchParams } = new URL(request.url);
+  const itemId = searchParams.get('itemId');
+  if (!itemId) return NextResponse.json({ error: 'missing_itemId' }, { status: 400 });
 
   try {
-    const incoming = await request.formData();
-    const form = new FormData();
-    const fileEntry = incoming.get('file');
-    if (!fileEntry) {
-      return NextResponse.json({ error: 'missing_file' }, { status: 400 });
-    }
-    form.append('file', fileEntry);
-
-    const response = await fetch(upstreamUrl, {
+    const response = await fetch(`${baseUrl}/user/purchase-invoice/group/item/${encodeURIComponent(itemId)}/reanalyze`, {
       method: 'POST',
       headers: { Authorization: authorization },
-      body: form,
     });
-
     const text = await response.text();
     let data: unknown = null;
     try { data = JSON.parse(text); } catch { /* non-JSON */ }
-
     if (!response.ok) {
       const err = (data as any) ?? {};
       return NextResponse.json(
-        { error: err.error ?? err.message ?? (text.slice(0, 200) || 'upstream_error') },
-        { status: response.status }
+        { error: err.error ?? err.message ?? text.slice(0, 200) || 'upstream_error' },
+        { status: response.status },
       );
     }
-
     return NextResponse.json(data, { status: response.status });
-  } catch (err) {
-    console.error('[upload] proxy error:', err);
+  } catch {
     return NextResponse.json({ error: 'service_unavailable' }, { status: 503 });
   }
 }

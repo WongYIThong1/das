@@ -12,6 +12,7 @@ import {
   type ProfileResponse,
   type SessionUser,
 } from '../lib/auth-api';
+import { registerAuthStore } from '../lib/auth-fetch';
 
 const AuthContext = createContext<AuthContextValue | null>(null);
 const ACTIVE_INVITE_STORAGE_KEY = 'auth.activeInviteCode';
@@ -75,6 +76,10 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   const [pendingAuthFlow, setPendingAuthFlowState] = useState<PendingAuthFlow | null>(() => readPendingAuthFlow());
   const [activeInviteCode, setActiveInviteCodeState] = useState<string | null>(() => readActiveInviteCode());
   const authRevisionRef = useRef(0);
+  // Ref keeps the latest token accessible synchronously from the auth store
+  // without needing to re-register on every token change.
+  const accessTokenRef = useRef<string | null>(null);
+  accessTokenRef.current = accessToken;
 
   const setProfile = useCallback((nextProfile: ProfileResponse | null) => {
     authRevisionRef.current += 1;
@@ -165,6 +170,26 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
       return profile;
     }
   }, [profile]);
+
+  // Register the auth store once so authFetch() can automatically refresh
+  // expired tokens and retry failed requests without involving components.
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  useEffect(() => {
+    registerAuthStore({
+      getToken: () => accessTokenRef.current,
+      refresh: async () => {
+        try {
+          const session = await refreshSession();
+          // Update React state so the rest of the app stays in sync.
+          setSession(session);
+          return session.accessToken;
+        } catch {
+          return null;
+        }
+      },
+    });
+  // Empty deps: the store uses refs/stable callbacks, no need to re-register.
+  }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
   useEffect(() => {
     if (authStatus !== 'authenticated' || !accessTokenExpiresAt) {

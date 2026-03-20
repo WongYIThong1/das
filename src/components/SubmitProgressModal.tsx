@@ -9,25 +9,25 @@ import { X, CheckCircle2, XCircle, Loader2, AlertTriangle, ArrowRight, Maximize2
 
 // ---------------------------------------------------------------------------
 
-const ORDERED_PHASES: SubmitPhase[] = ['queued', 'validating', 'creating_stock', 'creating_pi'];
+const ORDERED_PHASES: SubmitPhase[] = ['queued', 'validating', 'stock_creating', 'pi_creating'];
 
 function phaseIndex(phase: SubmitPhase | null): number {
-  if (!phase || phase === 'failed' || phase === 'completed') return -1;
+  if (!phase || phase === 'failed' || phase === 'stock_failed' || phase === 'completed') return -1;
   return ORDERED_PHASES.indexOf(phase);
 }
 
 const STEP_ICONS: Record<string, string> = {
   queued:         '⟳',
   validating:     '✦',
-  creating_stock: '⚙',
-  creating_pi:    '↗',
+  stock_creating: '⚙',
+  pi_creating:    '↗',
 };
 
 const STEP_LABELS: Record<string, string> = {
   queued:         'Queued',
   validating:     'Validating',
-  creating_stock: 'Creating Stock',
-  creating_pi:    'Creating Invoice',
+  stock_creating: 'Creating Stock',
+  pi_creating:    'Creating Invoice',
 };
 
 // ---------------------------------------------------------------------------
@@ -45,7 +45,7 @@ export default function SubmitProgressModal() {
   }, [isOpen, isRunning, status]);
 
   const isCompleted = status === 'completed';
-  const isFailed    = status === 'failed';
+  const isFailed    = status === 'failed' || status === 'stock_failed';
   const isDone      = isCompleted || isFailed;
   const currentIdx  = phaseIndex(status);
 

@@ -33,10 +33,11 @@ import { Button } from '@/components/ui/button';
 import { Calendar } from '@/components/ui/calendar';
 import { Popover, PopoverContent, PopoverTrigger } from '@/components/ui/popover';
 import { Slider } from '@/components/ui/slider';
-import { UploadInvoiceModal } from './UploadInvoiceModal';
-import { BatchPreviewModal } from './BatchPreviewModal';
+import { UploadInvoiceModal, type BatchCreatedPayload } from './UploadInvoiceModal';
 import DeleteConfirmModal from './DeleteConfirmModal';
 import { batchStore } from '../lib/batch-store';
+import { authFetch } from '../lib/auth-fetch';
+import { BatchStatusModal, type BatchStatusItem, type BatchItemPhase } from './BatchStatusModal';
 import { useAuth } from './AuthProvider';
 import { Input } from './ui/input';
 import { ApiRequestError } from '../lib/auth-api';
@@ -183,8 +184,330 @@ export function PurchaseInvoice() {
   const router = useRouter();
   const { profile, accessToken, clearAuthState } = useAuth();
   const [isUploadModalOpen, setIsUploadModalOpen] = useState(false);
-  const [batchFiles, setBatchFiles] = useState<File[]>([]);
-  const [isBatchModalOpen, setIsBatchModalOpen] = useState(false);
+
+  // ── Batch status modal ────────────────────────────────────────────────────
+  const [batchModalOpen, setBatchModalOpen] = useState(false);
+  const [batchGroupId, setBatchGroupId] = useState('');
+  const [batchItems, setBatchItems] = useState<BatchStatusItem[]>([]);
+  const [batchAllDone, setBatchAllDone] = useState(false);
+  const [batchNow, setBatchNow] = useState(Date.now());
+  const batchSseRef = useRef<AbortController | null>(null);
+  const [submittingItems, setSubmittingItems] = useState<Set<string>>(new Set());
+
+  // Tick while batch items are active
+  useEffect(() => {
+    if (!batchModalOpen || batchAllDone) return;
+    const t = window.setInterval(() => setBatchNow(Date.now()), 1000);
+    return () => window.clearInterval(t);
+  }, [batchModalOpen, batchAllDone]);
+
+  function mapBatchStatus(status: string): BatchItemPhase {
+    switch (status) {
+      case 'queued': case 'processing': case 'fileserver_uploading': return 'queued';
+      case 'ocrprocessing':  return 'ocr_processing';
+      case 'reanalyze_queued': case 'reanalyzing': return 'ocr_processing';
+      case 'aianalyzing':    return 'analyzing';
+      case 'completed': case 'completed_with_warnings': return 'succeeded';
+      case 'failed':    return 'failed';
+      case 'canceled':  return 'canceled';
+      case 'cancelled': return 'cancelled';
+      case 'submit_queued':    return 'submit_queued';
+      case 'submitting_stock': return 'submitting_stock';
+      case 'submitting_pi':    return 'submitting_pi';
+      case 'submitted':        return 'submitted';
+      case 'submit_failed':    return 'submit_failed';
+      case 'not_ready':        return 'not_ready';
+      default:          return 'queued';
+    }
+  }
+
+  function parseTs(v: string | null | undefined): number | null {
+    if (!v) return null;
+    const ms = Date.parse(v);
+    return isNaN(ms) ? null : ms;
+  }
+
+  async function fetchBatchItemImageUrl(itemId: string): Promise<string | null> {
+    try {
+      const res = await authFetch(
+        `/api/purchase-invoice/batch/item?itemId=${encodeURIComponent(itemId)}`,
+      );
+      if (!res.ok) return null;
+      const data = await res.json() as { task?: { fileServer?: { imageUrl?: string } } };
+      return data.task?.fileServer?.imageUrl ?? null;
+    } catch { return null; }
+  }
+
+  // Fetch the group snapshot and sync all item statuses from source of truth.
+  // Returns true if all items are in a terminal state (safe to stop monitoring).
+  async function syncGroupSnapshot(groupId: string, ctrl: AbortController): Promise<boolean> {
+    try {
+      const res = await authFetch(
+        `/api/purchase-invoice/batch/group?groupId=${encodeURIComponent(groupId)}`,
+        { signal: ctrl.signal },
+      );
+      if (!res.ok || ctrl.signal.aborted) return false;
+      const data = await res.json();
+      const items: Array<{ itemId?: string; taskId?: string; fileName?: string; status?: string; analysisStatus?: string; startedAt?: string; completedAt?: string }> = data?.items ?? [];
+      if (!items.length) return false;
+
+      const terminal = new Set<BatchItemPhase>(['succeeded', 'failed', 'canceled', 'cancelled', 'submitted', 'submit_failed', 'not_ready']);
+      // Determine completion directly from API data — not React state
+      const groupAnalysisDone = data.status === 'completed' || data.status === 'completed_with_failures';
+      // If a submit is in progress, don't stop until submit also completes
+      const submitInProgress = data.submitStatus === 'submitting';
+      const allItemsDone = items.every((it) => terminal.has(mapBatchStatus(it.status ?? '')));
+      const isDone = (groupAnalysisDone && !submitInProgress) || allItemsDone;
+
+      console.log('[syncGroupSnapshot] groupStatus:', data.status, 'allItemsDone:', allItemsDone);
+
+      setBatchNow(Date.now());
+      setBatchItems((prev) => {
+        const snapMap = new Map(items.map((it) => [it.itemId ?? '', it]));
+        const next = prev.map((item) => {
+          const snap = snapMap.get(item.id);
+          if (!snap) return item;
+          const phase = mapBatchStatus(snap.status ?? '');
+          const analysisPhase = snap.analysisStatus ? mapBatchStatus(snap.analysisStatus) : (phase === 'succeeded' ? 'succeeded' : item.analysisPhase);
+          return {
+            ...item,
+            phase,
+            analysisPhase,
+            fileName: snap.fileName ?? item.fileName,
+            previewTaskId: snap.taskId ?? item.previewTaskId,
+            startedAt: parseTs(snap.startedAt) ?? item.startedAt,
+            completedAt: parseTs(snap.completedAt) ?? item.completedAt,
+          };
+        });
+        if (isDone) setBatchAllDone(true);
+        return next;
+      });
+
+      // Fetch imageUrls for already-completed items
+      items.forEach((it) => {
+        if (mapBatchStatus(it.status ?? '') === 'succeeded' && it.itemId) {
+          const itemId = it.itemId;
+          void fetchBatchItemImageUrl(itemId).then((imageUrl) => {
+            if (!imageUrl || ctrl.signal.aborted) return;
+            setBatchItems((prev) =>
+              prev.map((item) => item.id === itemId ? { ...item, imageUrl } : item)
+            );
+          });
+        }
+      });
+
+      return isDone;
+    } catch { return false; }
+  }
+
+  function connectBatchSSE(groupId: string) {
+    batchSseRef.current?.abort();
+    const ctrl = new AbortController();
+    batchSseRef.current = ctrl;
+    void (async () => {
+      // Fetch source-of-truth snapshot before connecting SSE
+      const alreadyDone = await syncGroupSnapshot(groupId, ctrl);
+      if (alreadyDone || ctrl.signal.aborted) return;
+
+      // SSE loop — reconnects on unexpected disconnect
+      while (!ctrl.signal.aborted) {
+        let interrupted = false;
+        try {
+          const res = await authFetch(
+            `/api/purchase-invoice/batch/group/events?groupId=${encodeURIComponent(groupId)}`,
+            { signal: ctrl.signal },
+          );
+          if (!res.ok || !res.body) break;
+          const reader = res.body.getReader();
+          const decoder = new TextDecoder();
+          let buf = '';
+          let dataLine = '';
+          // Snapshot already fetched — skip all replay events, only process live events
+          let replayDone = false;
+          while (true) {
+            const { done, value } = await reader.read();
+            if (ctrl.signal.aborted) break;
+            if (done) { interrupted = true; break; }  // stream ended — treat as interrupted, re-sync
+            buf += decoder.decode(value, { stream: true });
+            const lines = buf.split('\n');
+            buf = lines.pop() ?? '';
+            for (const rawLine of lines) {
+              const line = rawLine.replace(/\r$/, '');
+              if (line.startsWith('data: ')) { dataLine = line.slice(6); }
+              else if (line === '' && dataLine) {
+                try {
+                  const ev = JSON.parse(dataLine) as {
+                    eventType?: string; itemId?: string; status?: string;
+                    fileName?: string; startedAt?: string; completedAt?: string;
+                  };
+                  // Mark when replay phase ends
+                  if (ev.eventType === 'replay_completed') {
+                    console.log('[SSE] replay_completed — now processing live events');
+                    replayDone = true;
+                    dataLine = '';
+                    continue;
+                  }
+                  // During replay, skip all events — snapshot is the source of truth
+                  if (!replayDone) {
+                    console.log('[SSE] skipping replay event:', ev.eventType, ev.status);
+                    dataLine = '';
+                    continue;
+                  }
+                  // Skip non-item live events
+                  if (
+                    ev.eventType === 'ping' ||
+                    ev.eventType === 'group_created' ||
+                    ev.eventType === 'group_status_changed'
+                  ) {
+                    dataLine = '';
+                    continue;
+                  }
+                  if (ev.eventType === 'item_status_changed' && ev.itemId) {
+                    const newPhase = mapBatchStatus(ev.status ?? '');
+                    console.log('[SSE] live item_status_changed:', ev.itemId, ev.status, '→', newPhase);
+                    setBatchNow(Date.now());
+                    setBatchItems((prev) => {
+                      const next = prev.map((item) =>
+                        item.id === ev.itemId
+                          ? {
+                              ...item,
+                              phase: newPhase,
+                              fileName: ev.fileName ?? item.fileName,
+                              startedAt: parseTs(ev.startedAt) ?? item.startedAt,
+                              completedAt: parseTs(ev.completedAt) ?? null,
+                            }
+                          : item
+                      );
+                      const terminal = new Set<BatchItemPhase>(['succeeded', 'failed', 'canceled', 'cancelled']);
+                      if (next.length > 0 && next.every((i) => terminal.has(i.phase))) {
+                        setBatchAllDone(true);
+                      }
+                      return next;
+                    });
+                    if (newPhase === 'succeeded') {
+                      const itemId = ev.itemId;
+                      void fetchBatchItemImageUrl(itemId).then((imageUrl) => {
+                        if (!imageUrl || ctrl.signal.aborted) return;
+                        setBatchItems((prev) =>
+                          prev.map((item) =>
+                            item.id === itemId ? { ...item, imageUrl } : item
+                          )
+                        );
+                      });
+                    }
+                  }
+                  if (
+                    (ev.eventType === 'item_submit_queued' ||
+                     ev.eventType === 'item_submit_status_changed' ||
+                     ev.eventType === 'item_submitted' ||
+                     ev.eventType === 'item_submit_failed' ||
+                     ev.eventType === 'item_submit_skipped') &&
+                    ev.itemId
+                  ) {
+                    // Derive phase: prefer ev.status, fall back to eventType mapping
+                    const phaseFromStatus = ev.status ? mapBatchStatus(ev.status) : null;
+                    const phaseFromEvent: BatchItemPhase | null =
+                      ev.eventType === 'item_submit_queued'      ? 'submit_queued' :
+                      ev.eventType === 'item_submitted'           ? 'submitted' :
+                      ev.eventType === 'item_submit_failed'       ? 'submit_failed' :
+                      ev.eventType === 'item_submit_skipped'      ? 'not_ready' : null;
+                    const newPhase: BatchItemPhase =
+                      (phaseFromStatus && phaseFromStatus !== 'queued') ? phaseFromStatus :
+                      phaseFromEvent ?? mapBatchStatus(ev.status ?? '');
+                    setBatchNow(Date.now());
+                    setBatchItems((prev) => {
+                      const next = prev.map((item) =>
+                        item.id === ev.itemId
+                          ? { ...item, phase: newPhase }
+                          : item
+                      );
+                      const terminal = new Set<BatchItemPhase>(['succeeded', 'failed', 'canceled', 'cancelled', 'submitted', 'submit_failed', 'not_ready']);
+                      if (next.length > 0 && next.every((i) => terminal.has(i.phase))) {
+                        setBatchAllDone(true);
+                      }
+                      return next;
+                    });
+                  }
+                } catch { /* ignore parse errors */ }
+                dataLine = '';
+              }
+            }
+          }
+        } catch {
+          if (ctrl.signal.aborted) break;
+          interrupted = true;
+        }
+        if (!interrupted || ctrl.signal.aborted) break;
+        // Re-fetch source of truth — returns true if all done, then stop
+        const allDone = await syncGroupSnapshot(groupId, ctrl);
+        if (allDone || ctrl.signal.aborted) break;
+        // Brief pause before reconnect
+        await new Promise((r) => setTimeout(r, 2000));
+      }
+    })();
+  }
+
+  function handleBatchCreated({ groupId, items }: BatchCreatedPayload) {
+    const initialItems: BatchStatusItem[] = items.map((it) => ({
+      id: it.itemId,
+      fileName: it.fileName,
+      fileSize: 0,
+      phase: 'queued' as BatchItemPhase,
+      previewTaskId: it.taskId,   // taskId is what the preview API expects
+      startedAt: null,
+      completedAt: null,
+      error: null,
+    }));
+    setBatchGroupId(groupId);
+    setBatchItems(initialItems);
+    setBatchAllDone(false);
+    setBatchNow(Date.now());
+    setBatchModalOpen(true);
+    connectBatchSSE(groupId);
+  }
+
+  async function handleSubmitItem(itemId: string) {
+    setSubmittingItems((prev) => new Set([...prev, itemId]));
+    try {
+      const res = await authFetch(`/api/purchase-invoice/batch/item/submit?itemId=${encodeURIComponent(itemId)}`, {
+        method: 'POST',
+      });
+      if (!res.ok) {
+        const data = await res.json().catch(() => null) as { error?: string } | null;
+        toast.error(data?.error ?? 'Submit failed.');
+      } else {
+        // Optimistically move item to submit_queued and reconnect SSE for live updates
+        setBatchItems((prev) => prev.map((it) => it.id === itemId ? { ...it, phase: 'submit_queued' } : it));
+        setBatchAllDone(false);
+        if (batchGroupId) connectBatchSSE(batchGroupId);
+      }
+    } catch {
+      toast.error('Submit failed.');
+    } finally {
+      setSubmittingItems((prev) => { const next = new Set(prev); next.delete(itemId); return next; });
+    }
+  }
+
+  async function handleSubmitAll() {
+    if (!batchGroupId) return;
+    try {
+      const res = await authFetch(`/api/purchase-invoice/batch/group/submit-all?groupId=${encodeURIComponent(batchGroupId)}`, {
+        method: 'POST',
+      });
+      const data = await res.json().catch(() => null) as { queuedCount?: number; error?: string } | null;
+      if (!res.ok) {
+        toast.error(data?.error ?? 'Submit all failed.');
+      } else {
+        toast.success(`${data?.queuedCount ?? 0} invoice${(data?.queuedCount ?? 0) !== 1 ? 's' : ''} queued for submission.`);
+        // Reconnect SSE to receive submit events
+        setBatchAllDone(false);
+        connectBatchSSE(batchGroupId);
+      }
+    } catch {
+      toast.error('Submit all failed.');
+    }
+  }
+
   const [isDisplayOpen, setIsDisplayOpen] = useState(false);
   const [selectedSortLabel, setSelectedSortLabel] = useState(sortOptions[0].label);
   const [selectedAutoRefreshLabel, setSelectedAutoRefreshLabel] = useState(autoRefreshOptions[0].label);
@@ -650,9 +973,7 @@ export function PurchaseInvoice() {
                 <p className="mx-auto max-w-md text-sm leading-6 text-zinc-600">
                   {activeFilterCount > 0
                     ? 'Try broadening your search, adjusting the supplier, or widening the amount and date range.'
-                    : company
-                      ? `${company} does not have any purchase invoices yet. Start by creating the first one for this workspace.`
-                      : 'This company database is currently empty.'}
+                    : 'This company database is currently empty.'}
                 </p>
               </div>
               <div className="flex flex-wrap items-center justify-center gap-2">
@@ -1141,30 +1462,20 @@ export function PurchaseInvoice() {
           <UploadInvoiceModal
             isOpen={isUploadModalOpen}
             onClose={() => setIsUploadModalOpen(false)}
-            onSuccess={(preview) => {
-              if (preview.taskId) {
-                const target = `/purchase-invoice/${preview.taskId}`;
-                router.prefetch(target);
-                router.push(target);
-                setIsUploadModalOpen(false);
-              } else {
-                toast.error('Preview task ID is missing. Please retry the upload.');
-              }
-            }}
-            onBatchFiles={(files) => {
-              setIsUploadModalOpen(false);
-              setBatchFiles(files);
-              setIsBatchModalOpen(true);
-            }}
+            onBatchCreated={handleBatchCreated}
           />
 
-          <BatchPreviewModal
-            isOpen={isBatchModalOpen}
-            files={batchFiles}
-            onClose={() => {
-              setIsBatchModalOpen(false);
-              setBatchFiles([]);
-            }}
+          <BatchStatusModal
+            isOpen={batchModalOpen}
+            batchId={batchGroupId}
+            groupId={batchGroupId}
+            items={batchItems}
+            allDone={batchAllDone}
+            now={batchNow}
+            onClose={() => { setBatchModalOpen(false); batchSseRef.current?.abort(); }}
+            onSubmitAll={handleSubmitAll}
+            onSubmitItem={handleSubmitItem}
+            submittingItems={submittingItems}
           />
 
           <DeleteConfirmModal

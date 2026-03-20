@@ -22,11 +22,12 @@ import { Search, AlertTriangle } from 'lucide-react';
 import { waitForPurchaseInvoicePreview, type PreviewTaskStatus, PurchaseInvoicePreviewPayload, PurchaseInvoicePreviewDetail, getCreditorOptions, getAgentOptions, getStockOptions, getCreditorDetail, getStockDetail, type PurchaseInvoicePreviewMatches, type PreviewProposedNewItem } from '../../../../lib/purchase-invoice-create-api';
 import { type PurchaseInvoiceSubmitRequest } from '../../../../lib/purchase-invoice-submit-api';
 import { useAuth } from '../../../../components/AuthProvider';
+import { authFetch } from '../../../../lib/auth-fetch';
 import { useSubmit } from '../../../../components/SubmitProvider';
 import { usePreviewProgress } from '../../../../components/PreviewProgressProvider';
 import { BatchStatusModal, type BatchStatusItem } from '../../../../components/BatchStatusModal';
 
-export default function PurchaseInvoiceTaskPage({ taskIdOverride, isGroup = false, groupId: groupIdProp }: { taskIdOverride?: string; isGroup?: boolean; groupId?: string } = {}) {
+export default function PurchaseInvoiceTaskPage({ taskIdOverride, isGroup = false, groupId: groupIdProp, earlyImageUrlOverride }: { taskIdOverride?: string; isGroup?: boolean; groupId?: string; earlyImageUrlOverride?: string } = {}) {
   const params = useParams();
   const router = useRouter();
   const taskId = taskIdOverride ?? (params.taskId as string);
@@ -45,6 +46,8 @@ export default function PurchaseInvoiceTaskPage({ taskIdOverride, isGroup = fals
   const [draftId, setDraftId] = useState<string>('');
   const [earlyDownloadUrl, setEarlyDownloadUrl] = useState<string | null>(null);
   const [earlyExternalLink, setEarlyExternalLink] = useState<string | null>(null);
+  const [earlyImageUrl, setEarlyImageUrl] = useState<string | null>(earlyImageUrlOverride ?? null);
+  const [previewMode, setPreviewMode] = useState<'form' | 'original'>('form');
   const [matches, setMatches] = useState<PurchaseInvoicePreviewMatches>({});
 
   const [createItemsEnabled, setCreateItemsEnabled] = useState<Record<number, boolean>>({});
@@ -53,6 +56,8 @@ export default function PurchaseInvoiceTaskPage({ taskIdOverride, isGroup = fals
   const [groupItems, setGroupItems] = useState<BatchStatusItem[]>([]);
   const [groupAllDone, setGroupAllDone] = useState(false);
   const [groupNow, setGroupNow] = useState(Date.now());
+  const [submittingGroupItems, setSubmittingGroupItems] = useState<Set<string>>(new Set());
+  const [groupMonitorNonce, setGroupMonitorNonce] = useState(0);
 
   // Search/Picker states
   const [creditorOptions, setCreditorOptions] = useState<any[]>([]);
@@ -103,6 +108,9 @@ export default function PurchaseInvoiceTaskPage({ taskIdOverride, isGroup = fals
         }
         if (nextTask.externalLink) {
           setEarlyExternalLink(nextTask.externalLink);
+        }
+        if (nextTask.imageUrl) {
+          setEarlyImageUrl(nextTask.imageUrl);
         }
       },
     })
@@ -180,6 +188,7 @@ export default function PurchaseInvoiceTaskPage({ taskIdOverride, isGroup = fals
           setTaskStatus(res.status);
           if (res.file?.downloadUrl) setEarlyDownloadUrl(res.file.downloadUrl);
           if (res.externalLink) setEarlyExternalLink(res.externalLink);
+          if (res.imageUrl) setEarlyImageUrl(res.imageUrl);
         },
       });
 
@@ -242,47 +251,123 @@ export default function PurchaseInvoiceTaskPage({ taskIdOverride, isGroup = fals
     const controller = new AbortController();
     const { signal } = controller;
 
-    const TERMINAL = new Set(['succeeded', 'failed', 'canceled', 'cancelled']);
+    const TERMINAL = new Set<BatchStatusItem['phase']>(['succeeded', 'failed', 'canceled', 'cancelled', 'submitted', 'submit_failed', 'not_ready']);
 
     const mapPhase = (s: string): BatchStatusItem['phase'] => {
       switch (s) {
-        case 'queued': case 'uploaded': return 'queued';
-        case 'ocr_started': case 'ocr_completed': return 'ocr_processing';
-        case 'draft_ready': case 'analyzing': return 'analyzing';
-        case 'completed': return 'succeeded';
+        case 'queued': case 'processing': case 'fileserver_uploading': return 'queued';
+        case 'ocrprocessing': return 'ocr_processing';
+        case 'reanalyze_queued': case 'reanalyzing': return 'ocr_processing';
+        case 'aianalyzing': return 'analyzing';
+        case 'completed': case 'completed_with_warnings': return 'succeeded';
         case 'failed': return 'failed';
+        case 'canceled': return 'canceled';
+        case 'cancelled': return 'cancelled';
+        case 'submit_queued': return 'submit_queued';
+        case 'submitting_stock': return 'submitting_stock';
+        case 'submitting_pi': return 'submitting_pi';
+        case 'submitted': return 'submitted';
+        case 'submit_failed': return 'submit_failed';
+        case 'not_ready': return 'not_ready';
         default: return 'queued';
       }
     };
     const parseMs = (v?: string | null) => { if (!v) return null; const ms = Date.parse(v); return isNaN(ms) ? null : ms; };
 
-    type GroupData = {
+    // itemId → mutable snapshot map so SSE can update individual rows
+    const itemMap = new Map<string, BatchStatusItem>();
+
+    type GroupSnapshot = {
       status?: string;
+      submitStatus?: string;
       items?: Array<{
-        taskId?: string; itemId?: string; fileName?: string; size?: number;
-        status?: string; warningCount?: number; downloadLink?: string;
-        startedAt?: string; completedAt?: string;
+        itemId?: string; taskId?: string; fileName?: string;
+        status?: string; analysisStatus?: string; startedAt?: string; completedAt?: string;
       }>;
     };
 
-    const applyGroupData = (data: GroupData): boolean => {
-      const mapped: BatchStatusItem[] = (data.items ?? []).map((it) => ({
-        id: it.taskId ?? it.itemId ?? '',
-        fileName: it.fileName ?? it.taskId ?? '',
-        fileSize: it.size ?? 0,
-        phase: mapPhase(it.status ?? ''),
-        previewTaskId: it.taskId ?? it.itemId ?? null,
-        startedAt: parseMs(it.startedAt),
-        completedAt: parseMs(it.completedAt),
-        error: null,
-        warningCount: it.warningCount ?? 0,
-        downloadUrl: it.downloadLink ?? undefined,
-      }));
-      if (mapped.length > 0) { setGroupItems(mapped); setGroupNow(Date.now()); }
-      const done = data.status === 'completed' || data.status === 'failed' || data.status === 'partial_failed'
-        || (mapped.length > 0 && mapped.every((i) => TERMINAL.has(i.phase)));
+    type SseEvent = {
+      eventType?: string; itemId?: string; status?: string;
+      fileName?: string; startedAt?: string; completedAt?: string;
+    };
+
+    const isGroupDone = (data: GroupSnapshot) => {
+      const analysisDone = data.status === 'completed' || data.status === 'completed_with_failures';
+      const submitInProgress = data.submitStatus === 'submitting';
+      return analysisDone && !submitInProgress;
+    };
+
+    const applySnapshot = (data: GroupSnapshot): boolean => {
+      for (const it of data.items ?? []) {
+        const id = it.itemId ?? it.taskId ?? '';
+        if (!id) continue;
+        const phase = mapPhase(it.status ?? '');
+        const analysisPhase = it.analysisStatus ? mapPhase(it.analysisStatus) : (phase === 'succeeded' ? 'succeeded' : undefined);
+        itemMap.set(id, {
+          id,
+          fileName: it.fileName ?? id,
+          fileSize: 0,
+          phase,
+          analysisPhase,
+          previewTaskId: it.taskId ?? it.itemId ?? null,
+          startedAt: parseMs(it.startedAt),
+          completedAt: parseMs(it.completedAt),
+          error: null,
+          warningCount: 0,
+        });
+      }
+      if (itemMap.size > 0) { setGroupItems([...itemMap.values()]); setGroupNow(Date.now()); }
+      const done = isGroupDone(data) || (itemMap.size > 0 && [...itemMap.values()].every((i) => TERMINAL.has(i.phase)));
       if (done) setGroupAllDone(true);
       return done;
+    };
+
+    const applyEvent = (ev: SseEvent): boolean => {
+      if (ev.eventType === 'item_status_changed' && ev.itemId) {
+        const existing = itemMap.get(ev.itemId) ?? {
+          id: ev.itemId, fileName: ev.fileName ?? ev.itemId,
+          fileSize: 0, previewTaskId: ev.itemId,
+          startedAt: null, completedAt: null, error: null, warningCount: 0,
+          phase: 'queued' as BatchStatusItem['phase'],
+        };
+        const newPhase = mapPhase(ev.status ?? '');
+        itemMap.set(ev.itemId, {
+          ...existing,
+          phase: newPhase,
+          fileName: ev.fileName ?? existing.fileName,
+          startedAt: parseMs(ev.startedAt) ?? existing.startedAt,
+          completedAt: parseMs(ev.completedAt) ?? existing.completedAt,
+        });
+        setGroupItems([...itemMap.values()]); setGroupNow(Date.now());
+      }
+      // Handle submit stage SSE events
+      if (
+        (ev.eventType === 'item_submit_queued' || ev.eventType === 'item_submit_status_changed' ||
+         ev.eventType === 'item_submitted' || ev.eventType === 'item_submit_failed' ||
+         ev.eventType === 'item_submit_skipped') && ev.itemId
+      ) {
+        const phaseFromStatus = ev.status ? mapPhase(ev.status) : null;
+        const phaseFromEvent: BatchStatusItem['phase'] | null =
+          ev.eventType === 'item_submit_queued'  ? 'submit_queued' :
+          ev.eventType === 'item_submitted'       ? 'submitted' :
+          ev.eventType === 'item_submit_failed'   ? 'submit_failed' :
+          ev.eventType === 'item_submit_skipped'  ? 'not_ready' : null;
+        const newPhase: BatchStatusItem['phase'] =
+          (phaseFromStatus && phaseFromStatus !== 'queued') ? phaseFromStatus :
+          phaseFromEvent ?? mapPhase(ev.status ?? '');
+        const existing = itemMap.get(ev.itemId);
+        if (existing) {
+          itemMap.set(ev.itemId, { ...existing, phase: newPhase });
+          setGroupItems([...itemMap.values()]); setGroupNow(Date.now());
+        }
+      }
+      if (ev.eventType === 'group_status_changed') {
+        const allTerminal = itemMap.size > 0 && [...itemMap.values()].every((i) => TERMINAL.has(i.phase));
+        if (allTerminal) { setGroupAllDone(true); return true; }
+      }
+      const allTerminal = itemMap.size > 0 && [...itemMap.values()].every((i) => TERMINAL.has(i.phase));
+      if (allTerminal) { setGroupAllDone(true); return true; }
+      return false;
     };
 
     let pollTimer: ReturnType<typeof setTimeout> | null = null;
@@ -290,14 +375,12 @@ export default function PurchaseInvoiceTaskPage({ taskIdOverride, isGroup = fals
       const poll = async () => {
         if (signal.aborted) return;
         try {
-          const pollHeaders: Record<string, string> = {};
-          if (accessToken) pollHeaders['Authorization'] = `Bearer ${accessToken}`;
-          const res = await fetch(`/api/purchase-invoice/tasks/group/${groupId}`, {
-            headers: pollHeaders, cache: 'no-store', signal,
+          const res = await authFetch(`/api/purchase-invoice/batch/group?groupId=${encodeURIComponent(groupId)}`, {
+            cache: 'no-store', signal,
           });
           if (!res.ok || signal.aborted) return;
-          const data = (await res.json()) as GroupData;
-          const done = applyGroupData(data);
+          const data = (await res.json()) as GroupSnapshot;
+          const done = applySnapshot(data);
           if (!done && !signal.aborted) pollTimer = setTimeout(poll, 2500);
         } catch {
           if (!signal.aborted) pollTimer = setTimeout(poll, 3000);
@@ -307,12 +390,23 @@ export default function PurchaseInvoiceTaskPage({ taskIdOverride, isGroup = fals
     };
 
     void (async () => {
+      // Initial snapshot fetch so the modal has data immediately
       try {
-        const sseHeaders: Record<string, string> = { Accept: 'text/event-stream' };
-        if (accessToken) sseHeaders['Authorization'] = `Bearer ${accessToken}`;
-        const res = await fetch(`/api/purchase-invoice/tasks/group/${groupId}/stream`, {
-          headers: sseHeaders, signal,
+        const res = await authFetch(`/api/purchase-invoice/batch/group?groupId=${encodeURIComponent(groupId)}`, {
+          cache: 'no-store', signal,
         });
+        if (res.ok) {
+          const data = (await res.json()) as GroupSnapshot;
+          if (applySnapshot(data)) return;
+        }
+      } catch { /* continue to SSE */ }
+
+      // Then connect to SSE for live updates
+      try {
+        const res = await authFetch(
+          `/api/purchase-invoice/batch/group/events?groupId=${encodeURIComponent(groupId)}`,
+          { headers: { Accept: 'text/event-stream' }, signal },
+        );
         if (!res.ok || !res.body) { startPolling(); return; }
 
         const reader = res.body.getReader();
@@ -321,30 +415,26 @@ export default function PurchaseInvoiceTaskPage({ taskIdOverride, isGroup = fals
         try {
           while (true) {
             const { done, value } = await reader.read();
-            if (value?.length) {
-              buf += decoder.decode(value, { stream: !done });
-            }
-            const blocks = buf.split('\n\n');
+            if (value?.length) buf += decoder.decode(value, { stream: !done });
+            const blocks = buf.split(/\r?\n\r?\n/);
             buf = done ? '' : (blocks.pop() ?? '');
             for (const block of blocks) {
               if (!block.trim()) continue;
               let dataStr = '';
-              for (const line of block.split('\n')) {
-                if (line.startsWith('data:')) dataStr += line.slice(5).trim();
+              for (const rawLine of block.split('\n')) {
+                const line = rawLine.replace(/\r$/, '');
+                if (line.startsWith('data:')) dataStr = line.slice(5).trim();
               }
               if (!dataStr) continue;
               try {
-                const parsed = JSON.parse(dataStr) as GroupData;
-                const isDone = applyGroupData(parsed);
-                if (isDone) return;
-              } catch { /* skip malformed event */ }
+                const ev = JSON.parse(dataStr) as SseEvent;
+                if (ev.eventType === 'replay_completed') continue;
+                if (applyEvent(ev)) return;
+              } catch { /* skip */ }
             }
             if (done) break;
           }
-        } finally {
-          reader.cancel().catch(() => {});
-        }
-        // SSE ended without reaching terminal state — fall back to polling
+        } finally { reader.cancel().catch(() => {}); }
         if (!signal.aborted) startPolling();
       } catch {
         if (!signal.aborted) startPolling();
@@ -357,7 +447,47 @@ export default function PurchaseInvoiceTaskPage({ taskIdOverride, isGroup = fals
       window.clearInterval(tick);
       if (pollTimer) clearTimeout(pollTimer);
     };
-  }, [isGroup, groupId, isStatsModalOpen, accessToken]);
+  }, [isGroup, groupId, isStatsModalOpen, accessToken, groupMonitorNonce]);
+
+  async function handleGroupSubmitItem(itemId: string) {
+    setSubmittingGroupItems((prev) => new Set([...prev, itemId]));
+    try {
+      const res = await authFetch(`/api/purchase-invoice/batch/item/submit?itemId=${encodeURIComponent(itemId)}`, {
+        method: 'POST',
+      });
+      if (!res.ok) {
+        const data = await res.json().catch(() => null) as { error?: string } | null;
+        toast.error(data?.error ?? 'Submit failed.');
+      } else {
+        setGroupItems((prev) => prev.map((it) => it.id === itemId ? { ...it, phase: 'submit_queued' } : it));
+        setGroupAllDone(false);
+        setGroupMonitorNonce((n) => n + 1);
+      }
+    } catch {
+      toast.error('Submit failed.');
+    } finally {
+      setSubmittingGroupItems((prev) => { const next = new Set(prev); next.delete(itemId); return next; });
+    }
+  }
+
+  async function handleGroupSubmitAll() {
+    if (!groupId) return;
+    try {
+      const res = await authFetch(`/api/purchase-invoice/batch/group/submit-all?groupId=${encodeURIComponent(groupId)}`, {
+        method: 'POST',
+      });
+      const data = await res.json().catch(() => null) as { queuedCount?: number; error?: string } | null;
+      if (!res.ok) {
+        toast.error(data?.error ?? 'Submit all failed.');
+      } else {
+        toast.success(`${data?.queuedCount ?? 0} invoice${(data?.queuedCount ?? 0) !== 1 ? 's' : ''} queued for submission.`);
+        setGroupAllDone(false);
+        setGroupMonitorNonce((n) => n + 1);
+      }
+    } catch {
+      toast.error('Submit all failed.');
+    }
+  }
 
   useEffect(() => {
     if (!isCreditorOpen) {
@@ -686,11 +816,11 @@ export default function PurchaseInvoiceTaskPage({ taskIdOverride, isGroup = fals
   };
 
   const buildSubmitRequest = (): PurchaseInvoiceSubmitRequest | null => {
-    if (!payload || !draftId) return null;
+    if (!payload || !taskId) return null;
 
     const details = payload.details.map((d: any, i: number) => {
-      const isNewItem = !!(createItemsEnabled[i] && matches.items?.[i]?.proposedNewItem);
-      const proposed = isNewItem ? ((matches.items?.[i]?.proposedNewItem || {}) as PreviewProposedNewItem) : null;
+      const isAutoCreate = !!(createItemsEnabled[i] && matches.items?.[i]?.proposedNewItem);
+      const proposed = isAutoCreate ? ((matches.items?.[i]?.proposedNewItem || {}) as PreviewProposedNewItem) : null;
       return {
         lineNo: i + 1,
         itemCode: d.itemCode || '',
@@ -703,14 +833,30 @@ export default function PurchaseInvoiceTaskPage({ taskIdOverride, isGroup = fals
         desc2: d.desc2 || '',
         taxCode: d.taxCode || '',
         itemGroup: d.itemGroup || '',
-        isNewItem,
-        autoCreateStock: isNewItem,
-        ...(isNewItem && proposed ? { stockProposal: proposed as unknown as Record<string, unknown> } : {}),
+        isAutoCreate,
+        ...(isAutoCreate && proposed ? {
+          autoCreateStock: {
+            ItemCode: d.itemCode || proposed.itemCodeSuggestion || '',
+            Description: d.description || proposed.description || '',
+            ItemGroup: d.itemGroup || proposed.itemGroup || '',
+            SalesUOM: proposed.salesUom || 'UNIT',
+            PurchaseUOM: proposed.purchaseUom || 'UNIT',
+            ReportUOM: proposed.reportUom || 'UNIT',
+            BaseUOM: proposed.baseUom || 'UNIT',
+            TaxCode: proposed.taxCode ?? null,
+            PurchaseTaxCode: proposed.purchaseTaxCode ?? null,
+            IsActive: proposed.active ?? true,
+            StockControl: proposed.stockControl ?? true,
+          },
+        } : {}),
       };
     });
 
+    // Build address lines from creditorAddressLines
+    const [invAddr1 = '', invAddr2 = '', invAddr3 = '', invAddr4 = ''] = payload.creditorAddressLines ?? [];
+
     return {
-      draftId,
+      taskId,
       accessToken: accessToken ?? undefined,
       header: {
         creditorCode: payload.creditorCode,
@@ -718,10 +864,14 @@ export default function PurchaseInvoiceTaskPage({ taskIdOverride, isGroup = fals
         supplierInvoiceNo: payload.supplierInvoiceNo,
         docDate: payload.docDate,
         displayTerm: payload.displayTerm,
-        location: payload.purchaseLocation || 'HQ',
-        currency: payload.currencyCode,
+        currencyCode: payload.currencyCode,
         currencyRate: payload.currencyRate,
         description: payload.description || 'PURCHASE INVOICE',
+        externalLink: earlyExternalLink || payload.externalLink || '',
+        invAddr1,
+        invAddr2,
+        invAddr3,
+        invAddr4,
       },
       details,
     };
@@ -730,12 +880,14 @@ export default function PurchaseInvoiceTaskPage({ taskIdOverride, isGroup = fals
   const handleSubmit = async () => {
     const req = buildSubmitRequest();
     if (!req) return;
+    console.log('[Submit] request payload:', JSON.stringify(req, null, 2));
     await startSubmit(req);
   };
 
   const handleSubmitSilent = async () => {
     const req = buildSubmitRequest();
     if (!req) return;
+    console.log('[Submit silent] request payload:', JSON.stringify(req, null, 2));
     await startSubmit(req, { silent: true });
   };
 
@@ -1026,18 +1178,15 @@ export default function PurchaseInvoiceTaskPage({ taskIdOverride, isGroup = fals
                                     const addrParts = [detail.address1, detail.address2, detail.address3, detail.address4]
                                       .map((s) => s?.trim())
                                       .filter(Boolean) as string[];
-                                    const addrLines = addrParts.length > 0
-                                      ? addrParts
-                                      : detail.creditorAddressLines ?? (detail.creditorAddress ? [detail.creditorAddress] : undefined);
                                     setPayload((prev) => {
                                       if (!prev) return prev;
                                       return {
                                         ...prev,
                                         purchaseAgent: detail.purchaseAgent ?? prev.purchaseAgent,
                                         displayTerm: detail.displayTerm ?? prev.displayTerm,
-                                        currencyCode: detail.currencyCode ?? detail.currency ?? prev.currencyCode,
+                                        currencyCode: detail.currencyCode ?? prev.currencyCode,
                                         currencyRate: detail.currencyRate ?? prev.currencyRate,
-                                        creditorAddressLines: addrLines ?? [],
+                                        creditorAddressLines: addrParts.length > 0 ? addrParts : prev.creditorAddressLines,
                                       };
                                     });
                                   });
@@ -1332,7 +1481,6 @@ export default function PurchaseInvoiceTaskPage({ taskIdOverride, isGroup = fals
                                           // Fetch full stock detail to fill accNo, taxCode, uom
                                           void getStockDetail(opt.itemCode, accessToken ?? undefined).then((detail) => {
                                             if (!detail) return;
-                                            const gi = detail.groupInfo as Record<string, unknown> | undefined;
                                             setPayload((prev) => {
                                               if (!prev) return prev;
                                               const newDetails = [...prev.details];
@@ -1340,11 +1488,12 @@ export default function PurchaseInvoiceTaskPage({ taskIdOverride, isGroup = fals
                                               if (!current) return prev;
                                               newDetails[index] = {
                                                 ...current,
-                                                accNo: (gi?.purchaseCode as string) ?? detail.accNo ?? current.accNo,
+                                                accNo: detail.purchaseCode ?? current.accNo,
                                                 taxCode: detail.purchaseTaxCode ?? detail.taxCode ?? current.taxCode,
                                                 itemGroup: detail.itemGroup ?? current.itemGroup,
                                                 uom: detail.purchaseUOM ?? detail.baseUOM ?? current.uom,
                                                 description: detail.description ?? current.description,
+                                                desc2: detail.description2 ?? detail.desc2 ?? current.desc2,
                                               };
                                               return { ...prev, details: newDetails };
                                             });
@@ -1494,8 +1643,70 @@ export default function PurchaseInvoiceTaskPage({ taskIdOverride, isGroup = fals
 
           {/* Right Column: Preview */}
           <div className="bg-[#f8f9fa] p-8 overflow-y-auto">
-            <h2 className="text-lg font-medium mb-8">Preview</h2>
-            
+            <div className="flex items-center justify-between mb-8">
+              <h2 className="text-lg font-medium">Preview</h2>
+              {(earlyImageUrl || earlyExternalLink) && (
+                <div className="flex items-center rounded-lg bg-zinc-100 p-1 gap-0.5">
+                  <button
+                    type="button"
+                    onClick={() => setPreviewMode('form')}
+                    className={`rounded-md px-3 py-1.5 text-xs font-medium transition-colors ${
+                      previewMode === 'form'
+                        ? 'bg-white text-zinc-900 shadow-sm'
+                        : 'text-zinc-500 hover:text-zinc-700'
+                    }`}
+                  >
+                    Form
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setPreviewMode('original')}
+                    className={`rounded-md px-3 py-1.5 text-xs font-medium transition-colors ${
+                      previewMode === 'original'
+                        ? 'bg-white text-zinc-900 shadow-sm'
+                        : 'text-zinc-500 hover:text-zinc-700'
+                    }`}
+                  >
+                    Original
+                  </button>
+                </div>
+              )}
+            </div>
+
+            {previewMode === 'original' && (earlyImageUrl || earlyExternalLink) ? (
+              <div className="flex flex-col items-center gap-4">
+                {earlyImageUrl ? (
+                  /* Rendered image preview (works for both images and PDFs) */
+                  <div className="w-full max-w-2xl mx-auto rounded-xl overflow-hidden shadow-[0_2px_12px_rgba(0,0,0,0.08)] bg-white">
+                    {/* eslint-disable-next-line @next/next/no-img-element */}
+                    <img
+                      src={earlyImageUrl}
+                      alt="Invoice original"
+                      className="w-full h-auto block"
+                    />
+                  </div>
+                ) : earlyExternalLink ? (
+                  /* PDF iframe fallback if no imageUrl */
+                  <iframe
+                    src={earlyExternalLink}
+                    className="w-full max-w-2xl mx-auto rounded-xl shadow-[0_2px_12px_rgba(0,0,0,0.08)] bg-white"
+                    style={{ height: '80vh', border: 'none' }}
+                    title="Invoice original"
+                  />
+                ) : null}
+                {earlyExternalLink && (
+                  <a
+                    href={earlyExternalLink}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    className="flex items-center gap-1.5 text-xs text-zinc-500 hover:text-zinc-800 transition-colors"
+                  >
+                    <Download size={12} />
+                    Download original file
+                  </a>
+                )}
+              </div>
+            ) : (
             <div className="bg-white rounded-2xl shadow-[0_2px_10px_rgba(0,0,0,0.04)] p-10 max-w-2xl mx-auto">
               {/* Logo */}
               <div className="mb-10 flex justify-between items-start">
@@ -1599,6 +1810,7 @@ export default function PurchaseInvoiceTaskPage({ taskIdOverride, isGroup = fals
                 </div>
               )}
             </div>
+            )}
           </div>
 
         </div>
@@ -1614,6 +1826,9 @@ export default function PurchaseInvoiceTaskPage({ taskIdOverride, isGroup = fals
       submitStatus={submitStatus ?? undefined}
       warningCount={groupItems.reduce((a, i) => a + (i.warningCount ?? 0), 0)}
       onClose={() => setIsStatsModalOpen(false)}
+      onSubmitItem={isGroup && groupId ? handleGroupSubmitItem : undefined}
+      onSubmitAll={isGroup && groupId ? handleGroupSubmitAll : undefined}
+      submittingItems={submittingGroupItems}
     />
     </TooltipProvider>
   );

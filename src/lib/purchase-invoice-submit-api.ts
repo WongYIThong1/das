@@ -1,4 +1,5 @@
 import { ApiRequestError } from './auth-api';
+import { authFetch } from './auth-fetch';
 
 // ─── Submit request types ──────────────────────────────────────────────────────
 
@@ -8,10 +9,28 @@ export type PurchaseInvoiceSubmitHeader = {
   supplierInvoiceNo: string;
   docDate: string;
   displayTerm: string;
-  location: string;
-  currency: string;
+  currencyCode: string;
   currencyRate: number | string;
   description: string;
+  externalLink: string;
+  invAddr1?: string;
+  invAddr2?: string;
+  invAddr3?: string;
+  invAddr4?: string;
+};
+
+export type PurchaseInvoiceAutoCreateStock = {
+  ItemCode: string;
+  Description: string;
+  ItemGroup?: string;
+  SalesUOM?: string;
+  PurchaseUOM?: string;
+  ReportUOM?: string;
+  BaseUOM?: string;
+  TaxCode?: string | null;
+  PurchaseTaxCode?: string | null;
+  IsActive?: boolean;
+  StockControl?: boolean;
 };
 
 export type PurchaseInvoiceSubmitDetailItem = {
@@ -26,13 +45,12 @@ export type PurchaseInvoiceSubmitDetailItem = {
   desc2: string;
   taxCode: string;
   itemGroup: string;
-  isNewItem?: boolean;
-  autoCreateStock?: boolean;
-  stockProposal?: Record<string, unknown>;
+  isAutoCreate: boolean;
+  autoCreateStock?: PurchaseInvoiceAutoCreateStock;
 };
 
 export type PurchaseInvoiceSubmitRequest = {
-  draftId: string;
+  taskId: string;
   accessToken?: string;
   header: PurchaseInvoiceSubmitHeader;
   details: PurchaseInvoiceSubmitDetailItem[];
@@ -40,20 +58,18 @@ export type PurchaseInvoiceSubmitRequest = {
 
 // ─── Response types ────────────────────────────────────────────────────────────
 
-/** Status values returned by POST /draft/{draftId}/submit and GET /submits/{submitId} */
 export type PurchaseInvoiceSubmitTaskStatus =
   | 'queued'
   | 'validating'
-  | 'creating_stock'
-  | 'creating_pi'
+  | 'stock_creating'
+  | 'stock_failed'
+  | 'pi_creating'
   | 'completed'
   | 'failed';
 
 export type PurchaseInvoiceSubmitCreateResponse = {
-  submitId: string;
+  submitTaskId: string;
   status: string;
-  statusUrl?: string;
-  sseUrl?: string;
 };
 
 export type PurchaseInvoiceSubmitValidationError = {
@@ -63,23 +79,27 @@ export type PurchaseInvoiceSubmitValidationError = {
   message?: string;
 };
 
-export type PurchaseInvoiceSubmitTaskResponse = {
-  submitId: string;
-  draftId?: string;
-  uploadId?: string;
-  bookId?: string;
-  status: PurchaseInvoiceSubmitTaskStatus;
-  stage?: string;
-  validationErrors?: PurchaseInvoiceSubmitValidationError[];
-  stockResults?: unknown;
-  piResult?: unknown;
-  lastError?: string;
-  createdAt?: string;
-  updatedAt?: string;
-  finishedAt?: string;
+export type PurchaseInvoiceSubmitWarning = {
+  code?: string;
+  severity?: string;
+  message?: string;
 };
 
-// Legacy alias kept for SubmitProvider compatibility
+export type PurchaseInvoiceSubmitTaskResponse = {
+  submitId: string;
+  submitTaskId?: string;
+  taskId?: string;
+  bookId?: string;
+  status: PurchaseInvoiceSubmitTaskStatus;
+  currentStep?: string;
+  validationErrors?: PurchaseInvoiceSubmitValidationError[];
+  stockResults?: unknown[];
+  piResult?: unknown;
+  lastError?: string;
+  warnings?: PurchaseInvoiceSubmitWarning[];
+};
+
+// Legacy alias
 export type PurchaseInvoiceSubmitResponse = {
   success: boolean;
 };
@@ -89,17 +109,49 @@ export type PurchaseInvoiceSubmitResponse = {
 export async function submitPurchaseInvoice(
   request: PurchaseInvoiceSubmitRequest
 ): Promise<PurchaseInvoiceSubmitCreateResponse> {
-  const { draftId, accessToken, header, details } = request;
+  const { taskId, accessToken, header, details } = request;
 
   const headers: Record<string, string> = {
     'Content-Type': 'application/json',
   };
   if (accessToken) headers['Authorization'] = `Bearer ${accessToken}`;
 
-  const response = await fetch(`/api/purchase-invoice/draft/${draftId}/submit`, {
+  const body = JSON.stringify({
+    taskId,
+    draft: {
+      header: {
+        creditorCode: header.creditorCode,
+        docDate: header.docDate,
+        supplierInvoiceNo: header.supplierInvoiceNo,
+        currencyCode: header.currencyCode,
+        currencyRate: header.currencyRate,
+        description: header.description || 'PURCHASE INVOICE',
+        externalLink: header.externalLink,
+        displayTerm: header.displayTerm,
+        invAddr1: header.invAddr1 ?? '',
+        invAddr2: header.invAddr2 ?? '',
+        invAddr3: header.invAddr3 ?? '',
+        invAddr4: header.invAddr4 ?? '',
+      },
+      details: details.map((d) => ({
+        itemCode: d.itemCode,
+        description: d.description,
+        uom: d.uom,
+        qty: d.qty,
+        unitPrice: d.unitPrice,
+        amount: d.amount,
+        taxCode: d.taxCode,
+        accNo: d.accNo,
+        isAutoCreate: d.isAutoCreate,
+        ...(d.isAutoCreate && d.autoCreateStock ? { autoCreateStock: d.autoCreateStock } : {}),
+      })),
+    },
+  });
+
+  const response = await authFetch('/api/purchase-invoice/submit', {
     method: 'POST',
     headers,
-    body: JSON.stringify({ header, details }),
+    body,
   });
 
   if (!response.ok) {
@@ -110,17 +162,23 @@ export async function submitPurchaseInvoice(
     );
   }
 
-  return (await response.json()) as PurchaseInvoiceSubmitCreateResponse;
+  const data = (await response.json()) as { submitTaskId?: string; status?: string };
+  return {
+    submitTaskId: data.submitTaskId ?? '',
+    status: data.status ?? 'queued',
+  };
 }
 
 export async function getPurchaseInvoiceSubmitTask(
-  submitId: string,
+  submitTaskId: string,
   accessToken?: string
 ): Promise<PurchaseInvoiceSubmitTaskResponse> {
   const headers: Record<string, string> = {};
   if (accessToken) headers['Authorization'] = `Bearer ${accessToken}`;
 
-  const response = await fetch(`/api/purchase-invoice/submits/${submitId}`, {
+  const url = `/api/purchase-invoice/submit/status?submitTaskId=${encodeURIComponent(submitTaskId)}`;
+
+  const response = await authFetch(url, {
     method: 'GET',
     headers,
     cache: 'no-store',
@@ -128,8 +186,43 @@ export async function getPurchaseInvoiceSubmitTask(
 
   if (!response.ok) {
     const payload = (await response.json().catch(() => null)) as { error?: string } | null;
-    throw new ApiRequestError(payload?.error ?? 'Submit task not found.', response.status);
+    throw new ApiRequestError(payload?.error ?? 'Status not found.', response.status);
   }
 
-  return (await response.json()) as PurchaseInvoiceSubmitTaskResponse;
+  const data = (await response.json()) as {
+    submitTaskId?: string;
+    taskId?: string;
+    bookId?: string;
+    status?: string;
+    currentStep?: string;
+    validationErrors?: PurchaseInvoiceSubmitValidationError[];
+    stockResults?: unknown[];
+    piResult?: unknown;
+    lastError?: string;
+    warnings?: PurchaseInvoiceSubmitWarning[];
+  };
+
+  const rawStatus = data.status ?? 'queued';
+  const status: PurchaseInvoiceSubmitTaskStatus =
+    rawStatus === 'completed'      ? 'completed' :
+    rawStatus === 'failed'         ? 'failed' :
+    rawStatus === 'stock_creating' ? 'stock_creating' :
+    rawStatus === 'stock_failed'   ? 'stock_failed' :
+    rawStatus === 'pi_creating'    ? 'pi_creating' :
+    rawStatus === 'validating'     ? 'validating' :
+    'queued';
+
+  return {
+    submitId: data.submitTaskId ?? submitTaskId,
+    submitTaskId: data.submitTaskId,
+    taskId: data.taskId,
+    bookId: data.bookId,
+    status,
+    currentStep: data.currentStep,
+    validationErrors: data.validationErrors,
+    stockResults: data.stockResults,
+    piResult: data.piResult,
+    lastError: data.lastError,
+    warnings: data.warnings,
+  };
 }

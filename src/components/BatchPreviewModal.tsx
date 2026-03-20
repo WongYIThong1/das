@@ -12,6 +12,7 @@ import {
 import { motion, AnimatePresence } from 'motion/react';
 import { ApiRequestError } from '../lib/auth-api';
 import { useAuth } from './AuthProvider';
+import { authFetch } from '../lib/auth-fetch';
 import { BatchStatusModal, type BatchStatusItem } from './BatchStatusModal';
 
 // ─── Types ────────────────────────────────────────────────────────────────────
@@ -90,12 +91,8 @@ export function BatchPreviewModal({ isOpen, files, onClose }: BatchPreviewModalP
         const formData = new FormData();
         for (const f of files) formData.append('files', f);
 
-        const headers: Record<string, string> = {};
-        if (accessToken) headers['Authorization'] = `Bearer ${accessToken}`;
-
-        const response = await fetch('/api/purchase-invoice/upload', {
+        const response = await authFetch('/api/purchase-invoice/upload', {
           method: 'POST',
-          headers,
           body: formData,
           signal: ctrl.signal,
         });
@@ -190,10 +187,8 @@ export function BatchPreviewModal({ isOpen, files, onClose }: BatchPreviewModalP
       const poll = async () => {
         if (signal.aborted) return;
         try {
-          const pollHeaders: Record<string, string> = {};
-          if (accessToken) pollHeaders['Authorization'] = `Bearer ${accessToken}`;
-          const res = await fetch(`/api/purchase-invoice/tasks/group/${groupId}`, {
-            headers: pollHeaders, cache: 'no-store', signal,
+          const res = await authFetch(`/api/purchase-invoice/tasks/group/${groupId}`, {
+            cache: 'no-store', signal,
           });
           if (!res.ok || signal.aborted) return;
           const data = (await res.json()) as GroupData;
@@ -208,10 +203,8 @@ export function BatchPreviewModal({ isOpen, files, onClose }: BatchPreviewModalP
 
     void (async () => {
       try {
-        const sseHeaders: Record<string, string> = { Accept: 'text/event-stream' };
-        if (accessToken) sseHeaders['Authorization'] = `Bearer ${accessToken}`;
-        const res = await fetch(`/api/purchase-invoice/tasks/group/${groupId}/stream`, {
-          headers: sseHeaders, signal,
+        const res = await authFetch(`/api/purchase-invoice/tasks/group/${groupId}/stream`, {
+          headers: { Accept: 'text/event-stream' }, signal,
         });
         if (!res.ok || !res.body) { startPolling(); return; }
 

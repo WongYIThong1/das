@@ -8,7 +8,9 @@
       "Bash(npx next:*)",
       "Bash(mkdir -p \"C:/Users/wongy/Desktop/das/src/app/api/purchase-invoice/draft/[draftId]/submit\")",
       "Bash(mkdir -p \"C:/Users/wongy/Desktop/das/src/app/api/purchase-invoice/submits/[submitId]\")",
-      "Bash(npx tsc:*)"
+      "Bash(npx tsc:*)",
+      "Bash(grep -v \"^$\")",
+      "Bash(grep:*)"
     ]
   }
 }

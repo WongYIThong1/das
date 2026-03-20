@@ -5,46 +5,70 @@ import { useParams, useRouter } from 'next/navigation';
 import Link from 'next/link';
 import {
   CheckCircle2, AlertCircle, Loader2, Clock, ArrowRight,
-  FileText, Download, AlertTriangle,
+  FileText, Download, AlertTriangle, Send,
 } from 'lucide-react';
 import { motion } from 'motion/react';
-import { useAuth } from '../../../../components/AuthProvider';
-import { type BatchStatusItem, type BatchItemPhase } from '../../../../components/BatchStatusModal';
+import { toast } from 'sonner';
+import { useAuth } from '../../../../../components/AuthProvider';
+import { authFetch } from '../../../../../lib/auth-fetch';
+import { type BatchStatusItem, type BatchItemPhase } from '../../../../../components/BatchStatusModal';
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
 const PHASE_LABEL: Record<BatchItemPhase, string> = {
-  pending:        'Pending',
-  queued:         'Queued',
-  ocr_processing: 'Reading',
-  analyzing:      'Analyzing',
-  succeeded:      'Ready',
-  failed:         'Failed',
-  canceled:       'Cancelled',
-  cancelled:      'Cancelled',
+  pending:          'Pending',
+  queued:           'Queued',
+  ocr_processing:   'Reading',
+  analyzing:        'Analysing',
+  succeeded:        'Ready',
+  failed:           'Failed',
+  canceled:         'Cancelled',
+  cancelled:        'Cancelled',
+  submit_queued:    'Queued',
+  submitting_stock: 'Creating Stock',
+  submitting_pi:    'Creating Invoice',
+  submitted:        'Submitted',
+  submit_failed:    'Submit Failed',
+  not_ready:        'Not Ready',
 };
 
 const PHASE_STYLE: Record<BatchItemPhase, string> = {
-  pending:        'bg-zinc-100 text-zinc-400',
-  queued:         'bg-sky-100 text-sky-700',
-  ocr_processing: 'bg-amber-100 text-amber-700',
-  analyzing:      'bg-violet-100 text-violet-700',
-  succeeded:      'bg-emerald-100 text-emerald-700',
-  failed:         'bg-red-100 text-red-600',
-  canceled:       'bg-zinc-100 text-zinc-400',
-  cancelled:      'bg-zinc-100 text-zinc-400',
+  pending:          'bg-zinc-100 text-zinc-400',
+  queued:           'bg-sky-100 text-sky-700',
+  ocr_processing:   'bg-amber-100 text-amber-700',
+  analyzing:        'bg-violet-100 text-violet-700',
+  succeeded:        'bg-emerald-100 text-emerald-700',
+  failed:           'bg-red-100 text-red-600',
+  canceled:         'bg-zinc-100 text-zinc-400',
+  cancelled:        'bg-zinc-100 text-zinc-400',
+  submit_queued:    'bg-sky-100 text-sky-700',
+  submitting_stock: 'bg-amber-100 text-amber-700',
+  submitting_pi:    'bg-violet-100 text-violet-700',
+  submitted:        'bg-emerald-100 text-emerald-700',
+  submit_failed:    'bg-red-100 text-red-600',
+  not_ready:        'bg-zinc-100 text-zinc-400',
 };
 
-const ACTIVE_PHASES   = new Set<BatchItemPhase>(['queued', 'ocr_processing', 'analyzing']);
-const TERMINAL_PHASES = new Set<BatchItemPhase>(['succeeded', 'failed', 'canceled', 'cancelled']);
+const ACTIVE_PHASES   = new Set<BatchItemPhase>(['queued', 'ocr_processing', 'analyzing', 'submit_queued', 'submitting_stock', 'submitting_pi']);
+const TERMINAL_PHASES = new Set<BatchItemPhase>(['succeeded', 'failed', 'canceled', 'cancelled', 'submitted', 'submit_failed', 'not_ready']);
+const SUBMIT_PHASES   = new Set<BatchItemPhase>(['submit_queued', 'submitting_stock', 'submitting_pi', 'submitted', 'submit_failed', 'not_ready']);
 
 function mapStatus(status: string): BatchItemPhase {
   switch (status) {
-    case 'queued': case 'uploaded': return 'queued';
-    case 'ocr_started': case 'ocr_completed': return 'ocr_processing';
-    case 'draft_ready': case 'analyzing': return 'analyzing';
-    case 'completed': return 'succeeded';
-    case 'failed': return 'failed';
+    case 'queued': case 'processing': case 'fileserver_uploading': return 'queued';
+    case 'ocrprocessing':  return 'ocr_processing';
+    case 'reanalyze_queued': case 'reanalyzing': return 'ocr_processing';
+    case 'aianalyzing':    return 'analyzing';
+    case 'completed': case 'completed_with_warnings': return 'succeeded';
+    case 'failed':    return 'failed';
+    case 'canceled':  return 'canceled';
+    case 'cancelled': return 'cancelled';
+    case 'submit_queued':    return 'submit_queued';
+    case 'submitting_stock': return 'submitting_stock';
+    case 'submitting_pi':    return 'submitting_pi';
+    case 'submitted':        return 'submitted';
+    case 'submit_failed':    return 'submit_failed';
+    case 'not_ready':        return 'not_ready';
     default: return 'queued';
   }
 }
@@ -69,10 +93,11 @@ export default function BatchGroupPage() {
   const groupId  = typeof params.groupId === 'string' ? params.groupId : '';
   const { accessToken } = useAuth();
 
-  const [items, setItems]     = useState<BatchStatusItem[]>([]);
-  const [allDone, setAllDone] = useState(false);
-  const [now, setNow]         = useState(Date.now());
-  const [error, setError]     = useState<string | null>(null);
+  const [items, setItems]               = useState<BatchStatusItem[]>([]);
+  const [allDone, setAllDone]           = useState(false);
+  const [now, setNow]                   = useState(Date.now());
+  const [error, setError]               = useState<string | null>(null);
+  const [submittingItems, setSubmittingItems] = useState<Set<string>>(new Set());
   const pollTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   // Clock tick
@@ -84,15 +109,11 @@ export default function BatchGroupPage() {
 
   // Poll group endpoint
   useEffect(() => {
-    if (!groupId || allDone) return;
-
-    const headers: Record<string, string> = {};
-    if (accessToken) headers['Authorization'] = `Bearer ${accessToken}`;
+    if (!groupId || !accessToken) return;
 
     const poll = async () => {
       try {
-        const res = await fetch(`/api/purchase-invoice/tasks/group/${groupId}`, {
-          headers,
+        const res = await authFetch(`/api/purchase-invoice/batch/group?groupId=${encodeURIComponent(groupId)}`, {
           cache: 'no-store',
         });
         if (!res.ok) {
@@ -102,12 +123,14 @@ export default function BatchGroupPage() {
 
         const data = (await res.json()) as {
           status?: string;
+          submitStatus?: string;
           items?: Array<{
             taskId?: string;
             itemId?: string;
             fileName?: string;
             size?: number;
             status?: string;
+            analysisStatus?: string;
             warningCount?: number;
             downloadLink?: string;
             startedAt?: string;
@@ -115,28 +138,32 @@ export default function BatchGroupPage() {
           }>;
         };
 
-        const mapped: BatchStatusItem[] = (data.items ?? []).map((item) => ({
-          id: item.taskId ?? item.itemId ?? '',
-          fileName: item.fileName ?? item.taskId ?? '',
-          fileSize: item.size ?? 0,
-          phase: mapStatus(item.status ?? ''),
-          previewTaskId: item.taskId ?? item.itemId ?? null,
-          startedAt: parseTs(item.startedAt),
-          completedAt: parseTs(item.completedAt),
-          error: null,
-          warningCount: item.warningCount ?? 0,
-          downloadUrl: item.downloadLink ?? undefined,
-        }));
+        const mapped: BatchStatusItem[] = (data.items ?? []).map((item) => {
+          const phase = mapStatus(item.status ?? '');
+          const analysisPhase = item.analysisStatus ? mapStatus(item.analysisStatus) : (phase === 'succeeded' ? 'succeeded' : undefined);
+          return {
+            id: item.itemId ?? item.taskId ?? '',
+            fileName: item.fileName ?? item.itemId ?? '',
+            fileSize: 0,
+            phase,
+            analysisPhase,
+            previewTaskId: item.taskId ?? item.itemId ?? null,
+            startedAt: parseTs(item.startedAt),
+            completedAt: parseTs(item.completedAt),
+            error: null,
+            warningCount: 0,
+            downloadUrl: undefined,
+          };
+        });
 
         if (mapped.length > 0) setItems(mapped);
         setNow(Date.now());
         setError(null);
 
-        const done =
-          data.status === 'completed' ||
-          data.status === 'failed' ||
-          data.status === 'partial_failed' ||
-          (mapped.length > 0 && mapped.every((i) => TERMINAL_PHASES.has(i.phase)));
+        const submitInProgress = data.submitStatus === 'submitting';
+        const groupAnalysisDone = data.status === 'completed' || data.status === 'completed_with_failures';
+        const allItemsDone = mapped.length > 0 && mapped.every((i) => TERMINAL_PHASES.has(i.phase));
+        const done = (groupAnalysisDone && !submitInProgress) || allItemsDone;
 
         if (done) {
           setAllDone(true);
@@ -150,13 +177,55 @@ export default function BatchGroupPage() {
 
     pollTimer.current = setTimeout(poll, 0);
     return () => { if (pollTimer.current) clearTimeout(pollTimer.current); };
-  }, [groupId, allDone, accessToken]);
+  }, [groupId, accessToken]);
+
+  async function handleSubmitItem(itemId: string) {
+    setSubmittingItems((prev) => new Set([...prev, itemId]));
+    try {
+      const res = await authFetch(`/api/purchase-invoice/batch/item/submit?itemId=${encodeURIComponent(itemId)}`, {
+        method: 'POST',
+      });
+      if (!res.ok) {
+        const data = await res.json().catch(() => null) as { error?: string } | null;
+        toast.error(data?.error ?? 'Submit failed.');
+      } else {
+        // Optimistically update phase and restart polling
+        setItems((prev) => prev.map((it) => it.id === itemId ? { ...it, phase: 'submit_queued' } : it));
+        setAllDone(false);
+      }
+    } catch {
+      toast.error('Submit failed.');
+    } finally {
+      setSubmittingItems((prev) => { const next = new Set(prev); next.delete(itemId); return next; });
+    }
+  }
+
+  async function handleSubmitAll() {
+    if (!groupId) return;
+    try {
+      const res = await authFetch(`/api/purchase-invoice/batch/group/submit-all?groupId=${encodeURIComponent(groupId)}`, {
+        method: 'POST',
+      });
+      const data = await res.json().catch(() => null) as { queuedCount?: number; error?: string } | null;
+      if (!res.ok) {
+        toast.error(data?.error ?? 'Submit all failed.');
+      } else {
+        toast.success(`${data?.queuedCount ?? 0} invoice${(data?.queuedCount ?? 0) !== 1 ? 's' : ''} queued for submission.`);
+        setAllDone(false);
+      }
+    } catch {
+      toast.error('Submit all failed.');
+    }
+  }
 
   const doneCount      = items.filter((i) => TERMINAL_PHASES.has(i.phase)).length;
   const succeededCount = items.filter((i) => i.phase === 'succeeded').length;
+  const submittedCount = items.filter((i) => i.phase === 'submitted').length;
+  const failedCount    = items.filter((i) => i.phase === 'failed' || i.phase === 'submit_failed').length;
   const warningTotal   = items.reduce((a, i) => a + (i.warningCount ?? 0), 0);
   const overallPct     = items.length > 0 ? Math.round((doneCount / items.length) * 100) : 0;
   const isComplete     = allDone || (items.length > 0 && doneCount === items.length);
+  const canSubmitAll   = succeededCount > 0;
 
   return (
     <div className="flex h-screen flex-col bg-white font-sans text-zinc-900">
@@ -166,12 +235,24 @@ export default function BatchGroupPage() {
           <h1 className="text-xl font-semibold tracking-tight text-zinc-950">Batch Upload</h1>
           <p className="mt-0.5 font-mono text-[11px] text-zinc-400">{groupId}</p>
         </div>
-        <Link
-          href="/purchase-invoice"
-          className="rounded-xl px-4 py-2 text-sm font-medium text-zinc-600 transition hover:bg-zinc-100 hover:text-zinc-900"
-        >
-          Back
-        </Link>
+        <div className="flex items-center gap-2">
+          {canSubmitAll && (
+            <button
+              type="button"
+              onClick={handleSubmitAll}
+              className="flex items-center gap-1.5 rounded-xl bg-zinc-950 px-4 py-2 text-sm font-semibold text-white transition hover:bg-zinc-800"
+            >
+              <Send size={13} />
+              Submit All Ready
+            </button>
+          )}
+          <Link
+            href="/purchase-invoice"
+            className="rounded-xl px-4 py-2 text-sm font-medium text-zinc-600 transition hover:bg-zinc-100 hover:text-zinc-900"
+          >
+            Back
+          </Link>
+        </div>
       </div>
 
       {/* Body */}
@@ -181,7 +262,7 @@ export default function BatchGroupPage() {
         ) : (
           <>
             {/* Summary cards */}
-            <div className="grid grid-cols-4 divide-x divide-zinc-100 rounded-2xl border border-zinc-200 bg-zinc-50/60 mb-6">
+            <div className="grid grid-cols-5 divide-x divide-zinc-100 rounded-2xl border border-zinc-200 bg-zinc-50/60 mb-6">
               <div className="px-5 py-4">
                 <p className="text-[10px] font-medium uppercase tracking-widest text-zinc-400">Total</p>
                 <p className="mt-1 text-2xl font-bold text-zinc-900">{items.length}</p>
@@ -197,10 +278,12 @@ export default function BatchGroupPage() {
                 </p>
               </div>
               <div className="px-5 py-4">
-                <p className="text-[10px] font-medium uppercase tracking-widest text-zinc-400">Warnings</p>
-                <p className={`mt-1 text-2xl font-bold ${warningTotal > 0 ? 'text-amber-500' : 'text-zinc-300'}`}>
-                  {warningTotal}
-                </p>
+                <p className="text-[10px] font-medium uppercase tracking-widest text-zinc-400">Submitted</p>
+                <p className={`mt-1 text-2xl font-bold ${submittedCount > 0 ? 'text-blue-600' : 'text-zinc-300'}`}>{submittedCount}</p>
+              </div>
+              <div className="px-5 py-4">
+                <p className="text-[10px] font-medium uppercase tracking-widest text-zinc-400">Failed</p>
+                <p className={`mt-1 text-2xl font-bold ${failedCount > 0 ? 'text-red-500' : 'text-zinc-300'}`}>{failedCount}</p>
               </div>
             </div>
 
@@ -215,9 +298,7 @@ export default function BatchGroupPage() {
               <div className="h-1.5 overflow-hidden rounded-full bg-zinc-100">
                 <motion.div
                   className={`h-full rounded-full ${
-                    isComplete && succeededCount === items.length
-                      ? 'bg-emerald-500'
-                      : isComplete ? 'bg-amber-400' : 'bg-zinc-900'
+                    isComplete && failedCount === 0 ? 'bg-emerald-500' : isComplete ? 'bg-amber-400' : 'bg-zinc-900'
                   }`}
                   animate={{ width: `${overallPct}%` }}
                   transition={{ ease: 'easeOut', duration: 0.4 }}
@@ -233,7 +314,7 @@ export default function BatchGroupPage() {
             ) : (
               <div className="rounded-2xl border border-zinc-200 overflow-hidden">
                 {/* Table header */}
-                <div className="grid grid-cols-[1fr_80px_56px_72px_96px] gap-3 border-b border-zinc-100 bg-zinc-50/60 px-5 py-3 text-[10px] font-semibold uppercase tracking-widest text-zinc-400">
+                <div className="grid grid-cols-[1fr_110px_56px_72px_120px] gap-3 border-b border-zinc-100 bg-zinc-50/60 px-5 py-3 text-[10px] font-semibold uppercase tracking-widest text-zinc-400">
                   <div>File</div>
                   <div>Status</div>
                   <div className="text-center">Warn</div>
@@ -249,15 +330,19 @@ export default function BatchGroupPage() {
                       ? (isDone ? item.completedAt ?? now : now) - item.startedAt
                       : null;
                     const warns = item.warningCount ?? 0;
+                    const analysisDone = item.analysisPhase === 'succeeded' || item.phase === 'succeeded';
+                    const inSubmitStage = SUBMIT_PHASES.has(item.phase);
+                    const canSubmit = analysisDone && !inSubmitStage;
+                    const isSubmitting = submittingItems.has(item.id);
 
                     return (
-                      <div key={item.id} className="grid grid-cols-[1fr_80px_56px_72px_96px] gap-3 items-center px-5 py-3">
+                      <div key={item.id} className="grid grid-cols-[1fr_110px_56px_72px_120px] gap-3 items-center px-5 py-3">
                         {/* File */}
                         <div className="flex min-w-0 items-center gap-2.5">
                           <div className="flex h-7 w-7 shrink-0 items-center justify-center rounded-lg bg-zinc-50">
-                            {item.phase === 'succeeded' ? (
+                            {item.phase === 'succeeded' || item.phase === 'submitted' ? (
                               <CheckCircle2 size={13} className="text-emerald-500" />
-                            ) : item.phase === 'failed' ? (
+                            ) : item.phase === 'failed' || item.phase === 'submit_failed' ? (
                               <AlertCircle size={13} className="text-red-500" />
                             ) : isActive ? (
                               <Loader2 size={13} className="animate-spin text-zinc-400" />
@@ -306,21 +391,31 @@ export default function BatchGroupPage() {
                               <Download size={10} />
                             </a>
                           ) : null}
-                          {item.phase === 'succeeded' && item.previewTaskId ? (
+                          {canSubmit && (
+                            <button
+                              type="button"
+                              disabled={isSubmitting}
+                              onClick={() => handleSubmitItem(item.id)}
+                              className="inline-flex items-center gap-1 rounded-lg border border-zinc-200 bg-white px-2 py-1 text-[11px] font-semibold text-zinc-700 transition hover:bg-zinc-50 disabled:opacity-50"
+                            >
+                              {isSubmitting ? <Loader2 size={10} className="animate-spin" /> : <Send size={10} />}
+                              Submit
+                            </button>
+                          )}
+                          {analysisDone ? (
                             <button
                               type="button"
                               onClick={() => {
-                                if (item.previewTaskId) {
-                                  sessionStorage.setItem(`groupId_for_${item.previewTaskId}`, groupId);
-                                }
-                                router.push(`/purchase-invoice/group/${item.previewTaskId}`);
+                                sessionStorage.setItem(`groupId_for_${item.id}`, groupId);
+                                if (item.imageUrl) sessionStorage.setItem(`imageUrl_for_${item.id}`, item.imageUrl);
+                                router.push(`/purchase-invoice/group/${item.id}`);
                               }}
                               className="inline-flex items-center gap-1 rounded-lg px-2 py-1 text-[11px] font-semibold text-zinc-700 transition hover:bg-zinc-100"
                             >
                               View <ArrowRight size={10} />
                             </button>
                           ) : (
-                            !item.downloadUrl && <span className="text-[11px] text-zinc-200">—</span>
+                            !canSubmit && !item.downloadUrl && <span className="text-[11px] text-zinc-200">—</span>
                           )}
                         </div>
                       </div>

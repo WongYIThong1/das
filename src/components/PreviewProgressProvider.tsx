@@ -8,6 +8,7 @@ import {
   type PurchaseInvoicePreviewTaskResponse,
 } from '../lib/purchase-invoice-create-api';
 import { ApiRequestError } from '../lib/auth-api';
+import { useAuth } from './AuthProvider';
 
 export type PreviewPhase = PreviewTaskStatus;
 
@@ -89,6 +90,7 @@ export function PreviewProgressProvider({ children }: { children: React.ReactNod
   const [mode, setMode] = useState<'reanalyze' | null>(null);
   const [fileName, setFileName] = useState<string | null>(null);
 
+  const { accessToken } = useAuth();
   const runningRef = useRef(false);
 
   const stepInfo = useMemo(() => {
@@ -124,13 +126,13 @@ export function PreviewProgressProvider({ children }: { children: React.ReactNod
 
     try {
       // Kick off reanalyze (async) and immediately start polling for task status.
-      const first = await reanalyzePurchaseInvoicePreviewTask(args.taskId);
+      const first = await reanalyzePurchaseInvoicePreviewTask(args.taskId, { accessToken: accessToken ?? undefined });
       setTask(first);
       setStatus(first.status);
       args.onProgress?.(first);
 
       while (true) {
-        const next = await getPurchaseInvoicePreviewTask(args.taskId);
+        const next = await getPurchaseInvoicePreviewTask(args.taskId, { accessToken: accessToken ?? undefined });
         setTask(next);
         setStatus(next.status);
         args.onProgress?.(next);
@@ -169,7 +171,7 @@ export function PreviewProgressProvider({ children }: { children: React.ReactNod
       runningRef.current = false;
       setIsRunning(false);
     }
-  }, []);
+  }, [accessToken]);
 
   const value: PreviewProgressContextValue = useMemo(
     () => ({

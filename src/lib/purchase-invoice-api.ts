@@ -1,4 +1,5 @@
 import { ApiRequestError } from './auth-api';
+import { authFetch } from './auth-fetch';
 
 export type PurchaseInvoiceListItem = {
   supplierInvoiceNo: string;
@@ -115,10 +116,9 @@ function parseMoney(value: string | number) {
 }
 
 export async function getPurchaseInvoiceList(params: GetPurchaseInvoiceListParams) {
-  const response = await fetch(`/api/purchase-invoice?${buildQuery(params).toString()}`, {
+  const response = await authFetch(`/api/purchase-invoice?${buildQuery(params).toString()}`, {
     method: 'GET',
     headers: {
-      Authorization: `Bearer ${params.accessToken}`,
       'X-Book-Id': params.bookId,
     },
     credentials: 'include',

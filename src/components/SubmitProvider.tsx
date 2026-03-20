@@ -8,6 +8,7 @@ import {
   type PurchaseInvoiceSubmitTaskStatus,
   type PurchaseInvoiceSubmitTaskResponse,
   type PurchaseInvoiceSubmitValidationError,
+  type PurchaseInvoiceSubmitWarning,
 } from '../lib/purchase-invoice-submit-api';
 import { ApiRequestError } from '../lib/auth-api';
 
@@ -25,22 +26,27 @@ export type SubmitStepInfo = {
 
 const STEP_MAP: Record<SubmitPhase, SubmitStepInfo> = {
   queued: {
-    progress: 10,
+    progress: 5,
     label: 'Queued',
     description: 'Invoice is queued and waiting to be processed.',
   },
   validating: {
-    progress: 35,
+    progress: 20,
     label: 'Validating',
-    description: 'Checking invoice data, item codes, and ledger rules.',
+    description: 'Checking invoice fields and stock items.',
   },
-  creating_stock: {
-    progress: 65,
+  stock_creating: {
+    progress: 50,
     label: 'Creating Stock',
-    description: 'Creating new stock items proposed by the system.',
+    description: 'Creating new stock items in the accounting system.',
   },
-  creating_pi: {
-    progress: 85,
+  stock_failed: {
+    progress: -1,
+    label: 'Stock Creation Failed',
+    description: 'Failed to create one or more stock items.',
+  },
+  pi_creating: {
+    progress: 80,
     label: 'Creating Invoice',
     description: 'Writing the purchase invoice into the accounting system.',
   },
@@ -111,11 +117,15 @@ function writeStored(v: StoredTask | null) {
 
 function formatErrorMessage(
   validationErrors: PurchaseInvoiceSubmitValidationError[] | undefined,
+  warnings: PurchaseInvoiceSubmitWarning[] | undefined,
   lastError: string | undefined,
   fallback: string
 ): string {
   if (validationErrors && validationErrors.length > 0) {
     return validationErrors.map((e) => e.message).filter(Boolean).join('; ') || fallback;
+  }
+  if (warnings && warnings.length > 0) {
+    return warnings.map((w) => w.message).filter(Boolean).join('; ') || fallback;
   }
   if (lastError === 'worker_unavailable') {
     return 'The accounting system worker is offline. Please contact your administrator.';
@@ -148,88 +158,31 @@ export function SubmitProvider({ children }: { children: React.ReactNode }) {
   // Processes a snapshot/status object from either SSE or polling.
   // Returns true if a terminal state was reached.
   const processSnapshot = useCallback((data: Partial<PurchaseInvoiceSubmitTaskResponse>): boolean => {
-    if (data.submitId) setTask(data as PurchaseInvoiceSubmitTaskResponse);
+    if (data.submitId || data.submitTaskId) setTask(data as PurchaseInvoiceSubmitTaskResponse);
 
     const newStatus = data.status;
     if (newStatus) setStatus(newStatus);
 
     if (newStatus === 'completed') return true;
 
-    if (newStatus === 'failed') {
-      setErrorMessage(formatErrorMessage(data.validationErrors, data.lastError, 'Purchase invoice creation failed.'));
+    if (newStatus === 'failed' || newStatus === 'stock_failed') {
+      setErrorMessage(formatErrorMessage(data.validationErrors, data.warnings, data.lastError, 'Purchase invoice creation failed.'));
       return true;
     }
 
     return false;
   }, []);
 
-  // SSE-based listener — returns normally on terminal state, throws if connection fails.
+  // No SSE endpoint for submit — always use polling.
+  // eslint-disable-next-line @typescript-eslint/no-unused-vars
   const listenSSE = useCallback(async (
-    submitId: string,
-    accessToken: string | undefined,
-    startedAt: number,
-    signal?: AbortSignal,
+    _submitId: string,
+    _accessToken: string | undefined,
+    _startedAt: number,
+    _signal?: AbortSignal,
   ): Promise<void> => {
-    const headers: Record<string, string> = { Accept: 'text/event-stream' };
-    if (accessToken) headers['Authorization'] = `Bearer ${accessToken}`;
-
-    const response = await fetch(`/api/purchase-invoice/submits/${submitId}/stream`, { headers, signal });
-    if (!response.ok || !response.body) throw new Error('sse_unavailable');
-
-    const reader = response.body.getReader();
-    const decoder = new TextDecoder();
-    let buf = '';
-
-    const ERROR_EVENTS = new Set(['validation_failed', 'stock_create_error', 'pi_create_error']);
-
-    try {
-      while (true) {
-        if (Date.now() - startedAt > POLL_TIMEOUT_MS) {
-          setErrorMessage('The operation timed out. Please check the invoice list.');
-          return;
-        }
-
-        const { done, value } = await reader.read();
-
-        if (value?.length) {
-          buf += decoder.decode(value, { stream: !done });
-        }
-        const blocks = buf.split('\n\n');
-        buf = done ? '' : (blocks.pop() ?? '');
-
-        for (const block of blocks) {
-          if (!block.trim()) continue;
-
-          let eventName = 'message';
-          let dataStr = '';
-          for (const line of block.split('\n')) {
-            if (line.startsWith('event:')) eventName = line.slice(6).trim();
-            else if (line.startsWith('data:')) dataStr = line.slice(5).trim();
-          }
-
-          if (!dataStr) continue;
-          let parsed: Partial<PurchaseInvoiceSubmitTaskResponse>;
-          try { parsed = JSON.parse(dataStr); } catch { continue; }
-
-          const isTerminal = processSnapshot(parsed);
-
-          if (ERROR_EVENTS.has(eventName) && !isTerminal) {
-            setStatus('failed');
-            setErrorMessage(
-              formatErrorMessage(parsed.validationErrors, parsed.lastError, 'Purchase invoice creation failed.')
-            );
-            return;
-          }
-
-          if (eventName === 'done' || isTerminal) return;
-        }
-
-        if (done) return;
-      }
-    } finally {
-      reader.cancel().catch(() => {});
-    }
-  }, [processSnapshot]);
+    throw new Error('sse_unavailable');
+  }, []);
 
   // Polling fallback — used when SSE is unavailable.
   const pollSubmitTask = useCallback(async (
@@ -304,7 +257,7 @@ export function SubmitProvider({ children }: { children: React.ReactNode }) {
 
     try {
       const createRes = await submitPurchaseInvoice(request);
-      const submitId = createRes.submitId;
+      const submitId = createRes.submitTaskId;
 
       if (!submitId) {
         setStatus('completed');
