@@ -1,8 +1,23 @@
 import { NextResponse } from 'next/server';
 import { verifyInviteCode } from '../../../../lib/invitecode-server';
 
+function getPublicOrigin(request: Request) {
+  const configuredOrigin = process.env.APP_URL?.trim();
+  if (configuredOrigin) {
+    return configuredOrigin.replace(/\/+$/, '');
+  }
+
+  const host = request.headers.get('x-forwarded-host')?.trim() || request.headers.get('host')?.trim();
+  const proto = request.headers.get('x-forwarded-proto')?.trim() || 'https';
+  if (host) {
+    return `${proto}://${host}`;
+  }
+
+  return new URL(request.url).origin;
+}
+
 function redirectTo(request: Request, pathname: string) {
-  const url = new URL(request.url);
+  const url = new URL(pathname, getPublicOrigin(request));
   url.pathname = pathname;
   url.search = '';
   return NextResponse.redirect(url);
