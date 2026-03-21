@@ -4,6 +4,7 @@ import type { ReactNode } from 'react';
 import { useEffect, useRef, useState } from 'react';
 import { usePathname, useRouter } from 'next/navigation';
 import { useAuth } from './AuthProvider';
+import { logoutSession } from '../lib/auth-api';
 
 function isPublicAuthPath(pathname: string) {
   return pathname === '/login' || pathname === '/register' || pathname === '/totp' || pathname === '/toptp';
@@ -111,7 +112,12 @@ export default function AuthGate({ children }: { children: ReactNode }) {
     }
 
     if (!isAuthenticated) {
-      router.replace('/login');
+      // Clear server-side session cookie before redirecting to prevent a
+      // redirect loop: if the cookie is still set, (auth)/layout would
+      // immediately redirect back to /home on every page load.
+      void logoutSession().catch(() => {}).finally(() => {
+        router.replace('/login');
+      });
     }
   }, [authStatus, clearPendingAuthFlow, isAuthenticated, pathname, pendingAuthFlow, router]);
 

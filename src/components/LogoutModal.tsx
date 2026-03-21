@@ -1,4 +1,5 @@
 import React from 'react';
+import { createPortal } from 'react-dom';
 import { X, LogOut, AlertTriangle } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
 
@@ -9,10 +10,10 @@ interface LogoutModalProps {
 }
 
 export function LogoutModal({ isOpen, onClose, onConfirm }: LogoutModalProps) {
-  return (
+  const modal = (
     <AnimatePresence>
       {isOpen && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-zinc-900/40 backdrop-blur-sm p-4">
+        <div className="fixed inset-0 z-[9999] flex items-center justify-center bg-zinc-900/40 backdrop-blur-sm p-4">
           <motion.div
             initial={{ opacity: 0, scale: 0.95, y: 10 }}
             animate={{ opacity: 1, scale: 1, y: 0 }}
@@ -23,8 +24,8 @@ export function LogoutModal({ isOpen, onClose, onConfirm }: LogoutModalProps) {
             {/* Header */}
             <div className="px-6 py-4 border-b border-zinc-100 flex items-center justify-between shrink-0">
               <h2 className="text-lg font-bold text-zinc-900">Sign out</h2>
-              <button 
-                onClick={onClose} 
+              <button
+                onClick={onClose}
                 className="p-1.5 text-zinc-400 hover:text-zinc-700 rounded-md hover:bg-zinc-100 transition-colors"
               >
                 <X size={18} />
@@ -63,4 +64,7 @@ export function LogoutModal({ isOpen, onClose, onConfirm }: LogoutModalProps) {
       )}
     </AnimatePresence>
   );
+
+  if (typeof document === 'undefined') return null;
+  return createPortal(modal, document.body);
 }

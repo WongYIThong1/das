@@ -15,7 +15,6 @@ import {
   X,
 } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
-import { LogoutModal } from './LogoutModal';
 import { useAuth } from './AuthProvider';
 import { logoutSession } from '../lib/auth-api';
 
@@ -37,15 +36,15 @@ function getItemFromPath(pathname: string) {
 interface SidebarProps {
   open?: boolean;
   onClose?: () => void;
+  onRequestLogout?: () => void;
 }
 
-export function Sidebar({ open, onClose }: SidebarProps) {
+export function Sidebar({ open, onClose, onRequestLogout }: SidebarProps) {
   const router = useRouter();
   const pathname = usePathname() ?? '/purchase-invoice';
-  const { profile, clearAuthState } = useAuth();
+  const { profile } = useAuth();
   const activeItem = getItemFromPath(pathname);
   const [isProfileMenuOpen, setIsProfileMenuOpen] = React.useState(false);
-  const [isLogoutDialogOpen, setIsLogoutDialogOpen] = React.useState(false);
   const profileMenuRef = React.useRef<HTMLDivElement>(null);
 
   React.useEffect(() => {
@@ -75,16 +74,6 @@ export function Sidebar({ open, onClose }: SidebarProps) {
   const displayEmail = profile?.email ?? 'No email';
   const initial = (profile?.username?.[0] || profile?.email?.[0] || 'U').toUpperCase();
 
-  const handleLogout = async () => {
-    setIsLogoutDialogOpen(false);
-    try {
-      await logoutSession();
-    } catch {
-      // Keep logout non-blocking when the backend is unavailable.
-    }
-    await clearAuthState();
-    router.push('/login');
-  };
   const menuGroups = [
     {
       label: 'Procurement',
@@ -233,10 +222,10 @@ export function Sidebar({ open, onClose }: SidebarProps) {
               </div>
 
               <div className="p-1">
-                <button 
+                <button
                   onClick={() => {
-                    setIsLogoutDialogOpen(true);
                     setIsProfileMenuOpen(false);
+                    onRequestLogout?.();
                   }}
                   className="w-full flex items-center gap-2 px-2 py-1.5 text-sm text-zinc-700 hover:text-red-600 hover:bg-red-50 rounded-md transition-colors"
                 >
@@ -248,11 +237,6 @@ export function Sidebar({ open, onClose }: SidebarProps) {
           )}
         </AnimatePresence>
 
-        <LogoutModal 
-          isOpen={isLogoutDialogOpen} 
-          onClose={() => setIsLogoutDialogOpen(false)} 
-          onConfirm={handleLogout}
-        />
 
         <button 
           onClick={() => setIsProfileMenuOpen(!isProfileMenuOpen)}
