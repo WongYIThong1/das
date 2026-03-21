@@ -4,6 +4,9 @@ import { createContext, useCallback, useContext, useMemo, useRef, useState } fro
 import {
   submitPurchaseInvoice,
   getPurchaseInvoiceSubmitTask,
+  formatPurchaseInvoiceSubmitValidationError,
+  formatPurchaseInvoiceSubmitPiResult,
+  formatPurchaseInvoiceSubmitStockResult,
   type PurchaseInvoiceSubmitRequest,
   type PurchaseInvoiceSubmitTaskStatus,
   type PurchaseInvoiceSubmitTaskResponse,
@@ -49,6 +52,11 @@ const STEP_MAP: Record<SubmitPhase, SubmitStepInfo> = {
     progress: 80,
     label: 'Creating Invoice',
     description: 'Writing the purchase invoice into the accounting system.',
+  },
+  submitted: {
+    progress: 100,
+    label: 'Submitted',
+    description: 'Purchase invoice has been successfully created.',
   },
   completed: {
     progress: 100,
@@ -116,13 +124,22 @@ function writeStored(v: StoredTask | null) {
 }
 
 function formatErrorMessage(
-  validationErrors: PurchaseInvoiceSubmitValidationError[] | undefined,
+  validationErrors: PurchaseInvoiceSubmitValidationError[] | Array<PurchaseInvoiceSubmitValidationError | string> | undefined,
   warnings: PurchaseInvoiceSubmitWarning[] | undefined,
+  stockResults: unknown[] | undefined,
+  piResult: unknown,
   lastError: string | undefined,
   fallback: string
 ): string {
   if (validationErrors && validationErrors.length > 0) {
-    return validationErrors.map((e) => e.message).filter(Boolean).join('; ') || fallback;
+    return validationErrors.map(formatPurchaseInvoiceSubmitValidationError).join('; ') || fallback;
+  }
+  if (stockResults && stockResults.length > 0) {
+    return stockResults.map((r) => formatPurchaseInvoiceSubmitStockResult(r as any)).join('; ') || fallback;
+  }
+  const piMessage = formatPurchaseInvoiceSubmitPiResult(piResult as any);
+  if (piMessage) {
+    return piMessage;
   }
   if (warnings && warnings.length > 0) {
     return warnings.map((w) => w.message).filter(Boolean).join('; ') || fallback;
@@ -163,10 +180,10 @@ export function SubmitProvider({ children }: { children: React.ReactNode }) {
     const newStatus = data.status;
     if (newStatus) setStatus(newStatus);
 
-    if (newStatus === 'completed') return true;
+    if (newStatus === 'completed' || newStatus === 'submitted') return true;
 
     if (newStatus === 'failed' || newStatus === 'stock_failed') {
-      setErrorMessage(formatErrorMessage(data.validationErrors, data.warnings, data.lastError, 'Purchase invoice creation failed.'));
+      setErrorMessage(formatErrorMessage(data.validationErrors, data.warnings, data.stockResults, data.piResult, data.lastError, 'Purchase invoice creation failed.'));
       return true;
     }
 
@@ -196,7 +213,7 @@ export function SubmitProvider({ children }: { children: React.ReactNode }) {
       if (isTerminal) return;
 
       if (Date.now() - startedAt > POLL_TIMEOUT_MS) {
-        setErrorMessage('The operation timed out. Please check the invoice list to see if it was created.');
+        setErrorMessage(formatErrorMessage(res.validationErrors, res.warnings, res.stockResults, res.piResult, res.lastError, 'The operation timed out. Please check the invoice list to see if it was created.'));
         return;
       }
 

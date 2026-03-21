@@ -25,25 +25,51 @@ export interface BatchPreviewModalProps {
 
 type Phase = 'uploading' | 'monitoring' | 'failed';
 
-const TERMINAL = new Set(['succeeded', 'failed', 'canceled', 'cancelled']);
+const TERMINAL = new Set(['succeeded', 'failed', 'canceled', 'cancelled', 'submitted', 'submit_failed', 'not_ready']);
 
-function mapStatus(status: string): BatchStatusItem['phase'] {
+function mapStatus(status: string): BatchStatusItem['phase'] | null {
   switch (status) {
     case 'queued':
     case 'uploaded':
+    case 'processing':
+    case 'fileserver_uploading':
       return 'queued';
     case 'ocr_started':
     case 'ocr_completed':
+    case 'ocrprocessing':
+    case 'reanalyze_queued':
+    case 'reanalyzing':
       return 'ocr_processing';
     case 'draft_ready':
     case 'analyzing':
+    case 'aianalyzing':
       return 'analyzing';
     case 'completed':
+    case 'completed_with_warnings':
+    case 'succeeded':
+    case 'success':
       return 'succeeded';
     case 'failed':
+    case 'error':
       return 'failed';
+    case 'canceled':
+      return 'canceled';
+    case 'cancelled':
+      return 'cancelled';
+    case 'submit_queued':
+      return 'submit_queued';
+    case 'submitting_stock':
+      return 'submitting_stock';
+    case 'submitting_pi':
+      return 'submitting_pi';
+    case 'submitted':
+      return 'submitted';
+    case 'submit_failed':
+      return 'submit_failed';
+    case 'not_ready':
+      return 'not_ready';
     default:
-      return 'queued';
+      return null;
   }
 }
 
@@ -114,7 +140,7 @@ export function BatchPreviewModal({ isOpen, files, onClose }: BatchPreviewModalP
           id: f.id ?? '',
           fileName: f.originalName ?? f.id ?? '',
           fileSize: f.size ?? 0,
-          phase: mapStatus(f.status ?? 'queued'),
+          phase: mapStatus(f.status ?? 'queued') ?? 'queued',
           previewTaskId: f.id ?? null,
           startedAt: Date.now(),
           completedAt: null,
@@ -162,19 +188,29 @@ export function BatchPreviewModal({ isOpen, files, onClose }: BatchPreviewModalP
     };
 
     const applyGroupData = (data: GroupData): boolean => {
-      const mapped: BatchStatusItem[] = (data.items ?? []).map((item) => ({
-        id: item.taskId ?? item.itemId ?? '',
-        fileName: item.fileName ?? item.taskId ?? '',
-        fileSize: item.size ?? 0,
-        phase: mapStatus(item.status ?? ''),
-        previewTaskId: item.taskId ?? item.itemId ?? null,
-        startedAt: parseTs(item.startedAt),
-        completedAt: parseTs(item.completedAt),
-        error: null,
-        warningCount: item.warningCount ?? 0,
-        downloadUrl: item.downloadLink ?? undefined,
-      }));
-      if (mapped.length > 0) setItems(mapped);
+      let mapped: BatchStatusItem[] = [];
+      setItems((prev) => {
+        const prevById = new Map(prev.map((item) => [item.id, item]));
+        mapped = (data.items ?? []).map((item) => {
+          const id = item.taskId ?? item.itemId ?? '';
+          const previous = prevById.get(id);
+          const phase = mapStatus(item.status ?? '') ?? previous?.phase ?? 'queued';
+          return {
+            id,
+            fileName: item.fileName ?? item.taskId ?? previous?.fileName ?? '',
+            fileSize: item.size ?? previous?.fileSize ?? 0,
+            phase,
+            previewTaskId: item.taskId ?? item.itemId ?? previous?.previewTaskId ?? null,
+            startedAt: parseTs(item.startedAt) ?? previous?.startedAt ?? null,
+            completedAt: parseTs(item.completedAt) ?? previous?.completedAt ?? null,
+            error: null,
+            warningCount: item.warningCount ?? previous?.warningCount ?? 0,
+            downloadUrl: item.downloadLink ?? previous?.downloadUrl,
+            imageUrl: previous?.imageUrl,
+          };
+        });
+        return mapped.length > 0 ? mapped : prev;
+      });
       setNow(Date.now());
       const groupDone =
         data.status === 'completed' || data.status === 'failed' || data.status === 'partial_failed' ||

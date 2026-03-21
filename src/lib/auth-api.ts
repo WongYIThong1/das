@@ -106,6 +106,14 @@ function getErrorMessage(code: string | undefined, fallback: string) {
       return 'MFA is already enabled for this account.';
     case 'invalid_refresh_token':
       return 'Your session has expired. Please sign in again.';
+    case 'signature_invalid':
+      return 'Your session could not be verified. Please sign in again.';
+    case 'session_not_found':
+      return 'Your session is no longer available. Please sign in again.';
+    case 'expired_refresh_token':
+      return 'Your session has expired. Please sign in again.';
+    case 'revoked_refresh_token':
+      return 'Your session was revoked. Please sign in again.';
     case 'service_unavailable':
       return 'The authentication service is temporarily unavailable.';
     default:
@@ -244,8 +252,10 @@ export async function getPendingAuthFlow() {
     await parseError(response, 'Unable to restore authentication state right now.');
   }
 
-  const payload = (await response.json()) as { pendingAuthFlow: PendingRegisterAuthFlow | PendingLoginAuthFlow };
-  return payload.pendingAuthFlow;
+  const payload = (await response.json()) as {
+    pendingAuthFlow?: PendingRegisterAuthFlow | PendingLoginAuthFlow | null;
+  } | null;
+  return payload?.pendingAuthFlow ?? null;
 }
 
 export async function clearPendingAuthFlowRemote() {

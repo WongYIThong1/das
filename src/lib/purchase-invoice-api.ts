@@ -2,6 +2,7 @@ import { ApiRequestError } from './auth-api';
 import { authFetch } from './auth-fetch';
 
 export type PurchaseInvoiceListItem = {
+  docKey: string;
   supplierInvoiceNo: string;
   supplier: string;
   agent: string;
@@ -46,6 +47,7 @@ export type GetPurchaseInvoiceListParams = {
 };
 
 type PurchaseInvoiceApiItem = {
+  docKey: string;
   supplierInvoiceNo: string;
   supplier: string;
   agent: string;
@@ -140,6 +142,7 @@ export async function getPurchaseInvoiceList(params: GetPurchaseInvoiceListParam
     pageSize: payload?.pageSize ?? params.pageSize,
     hasNext: Boolean(payload?.hasNext),
     items: (payload?.items ?? []).map((item) => ({
+      docKey: item.docKey,
       supplierInvoiceNo: item.supplierInvoiceNo,
       supplier: item.supplier,
       agent: item.agent,

@@ -18,11 +18,11 @@ export async function POST(request: Request) {
   );
 
   if (result.ok) {
-    return applySetCookies(NextResponse.json(result.data, { status: result.status }), result.setCookies);
+    return applySetCookies(NextResponse.json(result.data, { status: result.status }), result.setCookies, request);
   }
 
   if ('error' in result) {
-    return applySetCookies(jsonError(result.error, result.status), result.setCookies);
+    return applySetCookies(jsonError(result.error, result.status), result.setCookies, request);
   }
 
   return jsonError('service_unavailable', 503);

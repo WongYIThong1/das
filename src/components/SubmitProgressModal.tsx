@@ -6,13 +6,14 @@ import { useSubmit, getStepInfo, type SubmitPhase } from './SubmitProvider';
 import { useRouter } from 'next/navigation';
 import { motion, AnimatePresence } from 'motion/react';
 import { X, CheckCircle2, XCircle, Loader2, AlertTriangle, ArrowRight, Maximize2, Minimize2 } from 'lucide-react';
+import { formatPurchaseInvoiceSubmitPiResult, formatPurchaseInvoiceSubmitValidationError, formatPurchaseInvoiceSubmitStockResult } from '../lib/purchase-invoice-submit-api';
 
 // ---------------------------------------------------------------------------
 
 const ORDERED_PHASES: SubmitPhase[] = ['queued', 'validating', 'stock_creating', 'pi_creating'];
 
 function phaseIndex(phase: SubmitPhase | null): number {
-  if (!phase || phase === 'failed' || phase === 'stock_failed' || phase === 'completed') return -1;
+  if (!phase || phase === 'failed' || phase === 'stock_failed' || phase === 'completed' || phase === 'submitted') return -1;
   return ORDERED_PHASES.indexOf(phase);
 }
 
@@ -44,7 +45,7 @@ export default function SubmitProgressModal() {
     if (isOpen && isRunning && status === 'queued') setIsDocked(false);
   }, [isOpen, isRunning, status]);
 
-  const isCompleted = status === 'completed';
+  const isCompleted = status === 'completed' || status === 'submitted';
   const isFailed    = status === 'failed' || status === 'stock_failed';
   const isDone      = isCompleted || isFailed;
   const currentIdx  = phaseIndex(status);
@@ -64,6 +65,8 @@ export default function SubmitProgressModal() {
 
   // Validation errors from task snapshot
   const validationErrors = (task as any)?.validationErrors ?? [];
+  const stockResults = (task as any)?.stockResults ?? [];
+  const piResultMessage = formatPurchaseInvoiceSubmitPiResult((task as any)?.piResult);
 
   // ── Docked pill ──────────────────────────────────────────────────────────
   if (isDocked) {
@@ -235,15 +238,41 @@ export default function SubmitProgressModal() {
                   {validationErrors.map((e: any, i: number) => (
                     <li key={i} className="flex items-start gap-2 text-xs text-red-700">
                       <AlertTriangle className="mt-0.5 h-3.5 w-3.5 shrink-0 text-red-500" />
-                      <span>{e.message || e.code}{e.lineNo ? ` (line ${e.lineNo})` : ''}</span>
+                      <span>{formatPurchaseInvoiceSubmitValidationError(e)}</span>
                     </li>
                   ))}
                 </ul>
               </div>
             )}
 
+            {/* Stock results */}
+            {isFailed && stockResults.length > 0 && (
+              <div className="mx-6 mb-4 rounded-xl border border-amber-100 bg-amber-50 px-4 py-3">
+                <p className="mb-2 text-[10px] font-semibold uppercase tracking-widest text-amber-500">Stock Results</p>
+                <ul className="space-y-1">
+                  {stockResults.map((r: any, i: number) => (
+                    <li key={i} className="flex items-start gap-2 text-xs text-amber-700">
+                      <AlertTriangle className="mt-0.5 h-3.5 w-3.5 shrink-0 text-amber-500" />
+                      <span>{formatPurchaseInvoiceSubmitStockResult(r)}</span>
+                    </li>
+                  ))}
+                </ul>
+              </div>
+            )}
+
+            {/* PI result */}
+            {isFailed && piResultMessage && (
+              <div className="mx-6 mb-4 rounded-xl border border-rose-100 bg-rose-50 px-4 py-3">
+                <p className="mb-2 text-[10px] font-semibold uppercase tracking-widest text-rose-500">PI Result</p>
+                <div className="flex items-start gap-2 text-xs text-rose-700">
+                  <AlertTriangle className="mt-0.5 h-3.5 w-3.5 shrink-0 text-rose-500" />
+                  <span>{piResultMessage}</span>
+                </div>
+              </div>
+            )}
+
             {/* Generic error */}
-            {isFailed && errorMessage && validationErrors.length === 0 && (
+            {isFailed && errorMessage && validationErrors.length === 0 && stockResults.length === 0 && !piResultMessage && (
               <div className="mx-6 mb-4 flex items-start gap-3 rounded-xl border border-red-100 bg-red-50 px-4 py-3">
                 <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0 text-red-500" />
                 <p className="text-xs font-medium leading-relaxed text-red-700">{errorMessage}</p>

@@ -21,17 +21,17 @@ export async function POST(request: Request) {
   );
 
   if (result.ok) {
-    const response = applySetCookies(NextResponse.json(result.data, { status: result.status }), result.setCookies);
+    const response = NextResponse.json(result.data, { status: result.status });
     const sessionLike = result.data as { accessToken?: unknown; expiresIn?: unknown } | null;
     if (typeof sessionLike?.accessToken === 'string') {
       const expiresIn = typeof sessionLike.expiresIn === 'number' ? sessionLike.expiresIn : undefined;
-      setAppSessionCookie(response, { expiresInSeconds: expiresIn });
+      setAppSessionCookie(response, { expiresInSeconds: expiresIn, request });
     }
-    return response;
+    return applySetCookies(response, result.setCookies, request);
   }
 
   if ('error' in result) {
-    return applySetCookies(jsonError(result.error, result.status), result.setCookies);
+    return applySetCookies(jsonError(result.error, result.status), result.setCookies, request);
   }
 
   return jsonError('service_unavailable', 503);

@@ -26,9 +26,10 @@ export async function GET(request: Request) {
   const upstreamUrl = `${baseUrl}/user/purchase-invoice/create/status?taskId=${encodeURIComponent(taskId)}`;
 
   try {
+    const headers: Record<string, string> = { Authorization: authorization };
     const response = await fetch(upstreamUrl, {
       method: 'GET',
-      headers: { Authorization: authorization },
+      headers,
       cache: 'no-store',
     });
 

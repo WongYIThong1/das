@@ -2,16 +2,17 @@
 
 import React from 'react';
 import { usePathname, useRouter } from 'next/navigation';
-import { 
-  FileText, 
-  Users, 
-  Package, 
-  Home, 
-  Search, 
+import {
+  FileText,
+  Users,
+  Package,
+  Home,
+  Search,
   Bot,
   MoreVertical,
   LogOut,
-  BadgeCheck
+  BadgeCheck,
+  X,
 } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
 import { LogoutModal } from './LogoutModal';
@@ -33,7 +34,12 @@ function getItemFromPath(pathname: string) {
   return itemByRoute[pathname] ?? 'purchase-invoice';
 }
 
-export function Sidebar() {
+interface SidebarProps {
+  open?: boolean;
+  onClose?: () => void;
+}
+
+export function Sidebar({ open, onClose }: SidebarProps) {
   const router = useRouter();
   const pathname = usePathname() ?? '/purchase-invoice';
   const { profile, clearAuthState } = useAuth();
@@ -96,7 +102,13 @@ export function Sidebar() {
   ];
 
   return (
-    <div className="flex flex-col h-full w-[260px] bg-white border-r border-zinc-200 text-zinc-600 font-sans">
+    <div className={`
+      fixed inset-y-0 left-0 z-40 flex flex-col h-full w-[260px]
+      bg-white border-r border-zinc-200 text-zinc-600 font-sans
+      transition-transform duration-200
+      md:relative md:translate-x-0 md:z-auto
+      ${open ? 'translate-x-0' : '-translate-x-full md:translate-x-0'}
+    `}>
       <div className="p-3">
         <div className="flex items-center gap-3 px-2 py-2 text-left">
           <div className="flex h-11 w-11 items-center justify-center shrink-0 text-zinc-950">
@@ -105,6 +117,12 @@ export function Sidebar() {
           <div className="flex-1 min-w-0">
             <div className="text-[15px] font-semibold tracking-[0.08em] text-zinc-900 truncate">365BIZ AI</div>
           </div>
+          <button
+            onClick={onClose}
+            className="md:hidden flex h-7 w-7 items-center justify-center rounded-full text-zinc-400 hover:bg-zinc-100 hover:text-zinc-600"
+          >
+            <X size={16} />
+          </button>
         </div>
       </div>
 
@@ -138,7 +156,7 @@ export function Sidebar() {
                 return (
                   <button
                     key={item.id}
-                    onClick={() => router.push(routeByItem[item.id] ?? '/purchase-invoice')}
+                    onClick={() => { router.push(routeByItem[item.id] ?? '/purchase-invoice'); onClose?.(); }}
                     className={`relative w-full flex items-center gap-2.5 px-2 py-1.5 rounded-md text-[13px] font-medium transition-colors duration-200 group ${
                       isActive 
                         ? 'text-zinc-900' 

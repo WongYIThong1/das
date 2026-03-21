@@ -29,8 +29,8 @@ export type PurchaseInvoiceAutoCreateStock = {
   BaseUOM?: string;
   TaxCode?: string | null;
   PurchaseTaxCode?: string | null;
-  IsActive?: boolean;
-  StockControl?: boolean;
+  IsActive?: boolean | string;
+  StockControl?: boolean | string;
 };
 
 export type PurchaseInvoiceSubmitDetailItem = {
@@ -122,6 +122,7 @@ export type PurchaseInvoiceSubmitTaskStatus =
   | 'stock_creating'
   | 'stock_failed'
   | 'pi_creating'
+  | 'submitted'
   | 'completed'
   | 'failed';
 
@@ -139,7 +140,38 @@ export type PurchaseInvoiceSubmitEnvelope = {
   };
   stockCreates?: Array<{ success?: boolean }>;
   creditorCreate?: { success?: boolean };
+  validationErrors?: PurchaseInvoiceSubmitValidationErrorLike[];
+  warnings?: PurchaseInvoiceSubmitWarning[];
+  lastError?: string;
+  stockResults?: PurchaseInvoiceSubmitStockResultLike[];
+  piResult?: PurchaseInvoiceSubmitPiResultLike;
 };
+
+type SubmitErrorPayload = {
+  error?: string;
+  message?: string;
+  validationErrors?: PurchaseInvoiceSubmitValidationErrorLike[];
+  warnings?: PurchaseInvoiceSubmitWarning[];
+  stockResults?: PurchaseInvoiceSubmitStockResultLike[];
+  piResult?: PurchaseInvoiceSubmitPiResultLike;
+  lastError?: string;
+  currentStep?: string;
+};
+
+function formatSubmitErrorMessage(payload: SubmitErrorPayload | null, fallback: string): string {
+  const validationMessage = payload?.validationErrors?.map(formatPurchaseInvoiceSubmitValidationError).filter(Boolean).join('; ');
+  if (validationMessage) return validationMessage;
+  const stockMessage = payload?.stockResults?.map(formatPurchaseInvoiceSubmitStockResult).filter(Boolean).join('; ');
+  if (stockMessage) return stockMessage;
+  const piMessage = formatPurchaseInvoiceSubmitPiResult(payload?.piResult);
+  if (piMessage) return piMessage;
+  const warningMessage = payload?.warnings?.map((w) => w.message).filter(Boolean).join('; ');
+  if (warningMessage) return warningMessage;
+  if (payload?.message?.trim()) return payload.message;
+  if (payload?.lastError?.trim()) return payload.lastError;
+  if (payload?.error?.trim()) return payload.error;
+  return fallback;
+}
 
 export type PurchaseInvoiceSubmitCreateResponse = PurchaseInvoiceSubmitEnvelope;
 
@@ -150,11 +182,16 @@ export type PurchaseInvoiceSubmitValidationError = {
   message?: string;
 };
 
+export type PurchaseInvoiceSubmitValidationErrorLike = PurchaseInvoiceSubmitValidationError | string;
+
 export type PurchaseInvoiceSubmitWarning = {
   code?: string;
   severity?: string;
   message?: string;
 };
+
+export type PurchaseInvoiceSubmitStockResultLike = string | Record<string, unknown>;
+export type PurchaseInvoiceSubmitPiResultLike = string | Record<string, unknown> | null;
 
 export type PurchaseInvoiceSubmitTaskResponse = {
   submitId: string;
@@ -163,9 +200,9 @@ export type PurchaseInvoiceSubmitTaskResponse = {
   bookId?: string;
   status: PurchaseInvoiceSubmitTaskStatus;
   currentStep?: string;
-  validationErrors?: PurchaseInvoiceSubmitValidationError[];
-  stockResults?: unknown[];
-  piResult?: unknown;
+  validationErrors?: PurchaseInvoiceSubmitValidationErrorLike[];
+  stockResults?: PurchaseInvoiceSubmitStockResultLike[];
+  piResult?: PurchaseInvoiceSubmitPiResultLike;
   lastError?: string;
   warnings?: PurchaseInvoiceSubmitWarning[];
 };
@@ -181,9 +218,89 @@ function isSubmitRequestV2(request: PurchaseInvoiceSubmitRequest): request is Pu
   return 'taskId' in request;
 }
 
+export function formatPurchaseInvoiceSubmitValidationError(value: PurchaseInvoiceSubmitValidationErrorLike): string {
+  if (typeof value === 'string') {
+    switch (value) {
+      case 'client_offline':
+        return 'AutoCount client is offline or unreachable.';
+      case 'worker_unavailable':
+        return 'Submission worker is unavailable.';
+      default:
+        return value;
+    }
+  }
+
+  const parts = [value.message, value.code, value.field].filter((v): v is string => typeof v === 'string' && v.trim().length > 0);
+  const base = parts.join(' | ') || 'Validation error';
+  return value.lineNo ? `${base} (line ${value.lineNo})` : base;
+}
+
+export function formatPurchaseInvoiceSubmitStockResult(value: PurchaseInvoiceSubmitStockResultLike): string {
+  if (typeof value === 'string') {
+    switch (value) {
+      case 'client_offline':
+        return 'AutoCount client is offline or unreachable.';
+      case 'sync_in_progress':
+        return 'Stock sync is already in progress.';
+      default:
+        return value;
+    }
+  }
+
+  const record = value as Record<string, unknown>;
+  const entity = typeof record.entity === 'string' && record.entity.trim() ? record.entity : undefined;
+  const type = typeof record.type === 'string' && record.type.trim() ? record.type : undefined;
+  const reason = typeof record.reason === 'string' && record.reason.trim() ? record.reason : undefined;
+  const message =
+    typeof record.message === 'string' && record.message.trim() ? record.message :
+    typeof record.payload === 'object' && record.payload !== null && typeof (record.payload as Record<string, unknown>).message === 'string'
+      ? String((record.payload as Record<string, unknown>).message)
+      : undefined;
+
+  const head = [entity, type, reason].filter(Boolean).join(' / ');
+  if (head && message) return `${head}: ${message}`;
+  if (message) return message;
+  if (head) return head;
+  return 'Stock operation failed.';
+}
+
+export function formatPurchaseInvoiceSubmitPiResult(value: PurchaseInvoiceSubmitPiResultLike | undefined): string {
+  if (!value) return '';
+  if (typeof value === 'string') return value;
+
+  const record = value as Record<string, unknown>;
+  const entity = typeof record.entity === 'string' && record.entity.trim() ? record.entity : undefined;
+  const type = typeof record.type === 'string' && record.type.trim() ? record.type : undefined;
+  const reason = typeof record.reason === 'string' && record.reason.trim() ? record.reason : undefined;
+  const message =
+    typeof record.message === 'string' && record.message.trim() ? record.message :
+    typeof record.payload === 'object' && record.payload !== null && typeof (record.payload as Record<string, unknown>).message === 'string'
+      ? String((record.payload as Record<string, unknown>).message)
+      : undefined;
+
+  const head = [entity, type, reason].filter(Boolean).join(' / ');
+  if (head && message) return `${head}: ${message}`;
+  if (message) return message;
+  if (head) return head;
+  return '';
+}
+
+export function normalizePurchaseInvoiceSubmitStockResults(
+  value: unknown[] | undefined
+): PurchaseInvoiceSubmitStockResultLike[] {
+  if (!Array.isArray(value)) return [];
+  return value.filter((item): item is PurchaseInvoiceSubmitStockResultLike => {
+    return typeof item === 'string' || (typeof item === 'object' && item !== null);
+  });
+}
+
 export async function submitPurchaseInvoice(
   request: PurchaseInvoiceSubmitRequest
 ): Promise<PurchaseInvoiceSubmitEnvelope> {
+  if (!request || typeof request !== 'object') {
+    throw new ApiRequestError('Invalid submit payload: request is null.', 400);
+  }
+
   const accessToken = request.accessToken;
 
   const headers: Record<string, string> = {
@@ -232,10 +349,11 @@ export async function submitPurchaseInvoice(
   });
 
   if (!response.ok) {
-    const payload = (await response.json().catch(() => null)) as { error?: string; message?: string } | null;
+    const payload = (await response.json().catch(() => null)) as SubmitErrorPayload | null;
     throw new ApiRequestError(
-      payload?.error ?? payload?.message ?? 'Failed to submit purchase invoice.',
-      response.status
+      formatSubmitErrorMessage(payload, 'Failed to submit purchase invoice.'),
+      response.status,
+      payload,
     );
   }
 
@@ -280,8 +398,12 @@ export async function getPurchaseInvoiceSubmitTask(
   });
 
   if (!response.ok) {
-    const payload = (await response.json().catch(() => null)) as { error?: string } | null;
-    throw new ApiRequestError(payload?.error ?? 'Status not found.', response.status);
+    const payload = (await response.json().catch(() => null)) as SubmitErrorPayload | null;
+    throw new ApiRequestError(
+      formatSubmitErrorMessage(payload, 'Status not found.'),
+      response.status,
+      payload,
+    );
   }
 
   const data = (await response.json()) as {
@@ -290,9 +412,9 @@ export async function getPurchaseInvoiceSubmitTask(
     bookId?: string;
     status?: string;
     currentStep?: string;
-    validationErrors?: PurchaseInvoiceSubmitValidationError[];
+    validationErrors?: PurchaseInvoiceSubmitValidationErrorLike[];
     stockResults?: unknown[];
-    piResult?: unknown;
+    piResult?: PurchaseInvoiceSubmitPiResultLike;
     lastError?: string;
     warnings?: PurchaseInvoiceSubmitWarning[];
   };
@@ -300,6 +422,8 @@ export async function getPurchaseInvoiceSubmitTask(
   const rawStatus = data.status ?? 'queued';
   const status: PurchaseInvoiceSubmitTaskStatus =
     rawStatus === 'completed'      ? 'completed' :
+    rawStatus === 'submitted'      ? 'submitted' :
+    rawStatus === 'success'        ? 'submitted' :
     rawStatus === 'failed'         ? 'failed' :
     rawStatus === 'stock_creating' ? 'stock_creating' :
     rawStatus === 'stock_failed'   ? 'stock_failed' :
@@ -315,8 +439,8 @@ export async function getPurchaseInvoiceSubmitTask(
     status,
     currentStep: data.currentStep,
     validationErrors: data.validationErrors,
-    stockResults: data.stockResults,
-    piResult: data.piResult,
+    stockResults: normalizePurchaseInvoiceSubmitStockResults(data.stockResults),
+    piResult: data.piResult ?? null,
     lastError: data.lastError,
     warnings: data.warnings,
   };
@@ -333,29 +457,59 @@ export async function waitForPurchaseInvoiceSubmit(
 
   while (true) {
     const task = await getPurchaseInvoiceSubmitTask(submitTaskId, accessToken);
-    if (task.status === 'completed' || task.status === 'failed' || task.status === 'stock_failed') {
+    if (task.status === 'completed' || task.status === 'submitted' || task.status === 'failed' || task.status === 'stock_failed') {
       return {
         submitTaskId: task.submitTaskId ?? task.submitId,
         taskId: task.taskId,
         status: task.status,
-        httpStatus: task.status === 'completed' ? 201 : 200,
-        success: task.status === 'completed',
-        message: task.lastError,
+        httpStatus: task.status === 'completed' || task.status === 'submitted' ? 201 : 200,
+        success: task.status === 'completed' || task.status === 'submitted',
+        message: task.lastError || task.validationErrors?.map(formatPurchaseInvoiceSubmitValidationError).filter(Boolean).join('; ') || task.stockResults?.map(formatPurchaseInvoiceSubmitStockResult).filter(Boolean).join('; ') || formatPurchaseInvoiceSubmitPiResult(task.piResult) || task.warnings?.map((w) => w.message).filter(Boolean).join('; ') || undefined,
         purchaseInvoice: {
-          success: task.status === 'completed',
-          message: task.lastError,
+          success: task.status === 'completed' || task.status === 'submitted',
+          message: task.lastError || task.validationErrors?.map(formatPurchaseInvoiceSubmitValidationError).filter(Boolean).join('; ') || task.stockResults?.map(formatPurchaseInvoiceSubmitStockResult).filter(Boolean).join('; ') || formatPurchaseInvoiceSubmitPiResult(task.piResult) || task.warnings?.map((w) => w.message).filter(Boolean).join('; ') || undefined,
         },
+        validationErrors: task.validationErrors,
+        warnings: task.warnings,
+        lastError: task.lastError,
+        stockResults: task.stockResults,
+        piResult: task.piResult,
       };
     }
 
     if (Date.now() - startedAt > timeoutMs) {
+      const finalTask = await getPurchaseInvoiceSubmitTask(submitTaskId, accessToken).catch(() => null);
+      if (finalTask && (finalTask.status === 'completed' || finalTask.status === 'submitted' || finalTask.status === 'failed' || finalTask.status === 'stock_failed')) {
+        return {
+          submitTaskId: finalTask.submitTaskId ?? finalTask.submitId,
+          taskId: finalTask.taskId,
+          status: finalTask.status,
+        httpStatus: finalTask.status === 'completed' || finalTask.status === 'submitted' ? 201 : 200,
+        success: finalTask.status === 'completed' || finalTask.status === 'submitted',
+        message: finalTask.lastError || finalTask.validationErrors?.map(formatPurchaseInvoiceSubmitValidationError).filter(Boolean).join('; ') || finalTask.stockResults?.map(formatPurchaseInvoiceSubmitStockResult).filter(Boolean).join('; ') || formatPurchaseInvoiceSubmitPiResult(finalTask.piResult) || finalTask.warnings?.map((w) => w.message).filter(Boolean).join('; ') || undefined,
+        purchaseInvoice: {
+          success: finalTask.status === 'completed' || finalTask.status === 'submitted',
+          message: finalTask.lastError || finalTask.validationErrors?.map(formatPurchaseInvoiceSubmitValidationError).filter(Boolean).join('; ') || finalTask.stockResults?.map(formatPurchaseInvoiceSubmitStockResult).filter(Boolean).join('; ') || formatPurchaseInvoiceSubmitPiResult(finalTask.piResult) || finalTask.warnings?.map((w) => w.message).filter(Boolean).join('; ') || undefined,
+        },
+          validationErrors: finalTask.validationErrors,
+          warnings: finalTask.warnings,
+          lastError: finalTask.lastError,
+          stockResults: finalTask.stockResults,
+          piResult: finalTask.piResult,
+        };
+      }
       return {
         submitTaskId: task.submitTaskId ?? task.submitId ?? submitTaskId,
         taskId: task.taskId,
         status: task.status,
         httpStatus: 202,
         success: false,
-        message: 'submit_timeout',
+        message: task.lastError || task.validationErrors?.map(formatPurchaseInvoiceSubmitValidationError).filter(Boolean).join('; ') || task.stockResults?.map(formatPurchaseInvoiceSubmitStockResult).filter(Boolean).join('; ') || formatPurchaseInvoiceSubmitPiResult(task.piResult) || task.warnings?.map((w) => w.message).filter(Boolean).join('; ') || 'submit_timeout',
+        validationErrors: task.validationErrors,
+        warnings: task.warnings,
+        lastError: task.lastError,
+        stockResults: task.stockResults,
+        piResult: task.piResult,
       };
     }
 

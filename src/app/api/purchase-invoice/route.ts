@@ -20,11 +20,6 @@ export async function GET(request: Request) {
     return NextResponse.json({ error: 'invalid_request' }, { status: 400 });
   }
 
-  const bookId = request.headers.get('x-book-id')?.trim();
-  if (!bookId) {
-    return NextResponse.json({ error: 'invalid_request' }, { status: 400 });
-  }
-
   const incomingUrl = new URL(request.url);
   const upstreamUrl = new URL(`${baseUrl}/user/purchase-invoice`);
   upstreamUrl.search = incomingUrl.search;
@@ -32,10 +27,7 @@ export async function GET(request: Request) {
   try {
     const response = await fetch(upstreamUrl, {
       method: 'GET',
-      headers: {
-        Authorization: authorization,
-        'X-Book-Id': bookId,
-      },
+      headers: { Authorization: authorization },
       cache: 'no-store',
     });
 

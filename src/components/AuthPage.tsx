@@ -201,7 +201,7 @@ export function AuthPage({ mode, inviteCode, onNavigate }: AuthPageProps) {
         });
 
         if (!loginResponse.mfaToken) {
-          throw new ApiRequestError('MFA challenge is missing from the login response.', 401);
+          throw new ApiRequestError('This account still needs MFA setup before it can sign in. Please complete the enrollment flow first.', 401);
         }
         const pendingResponse = await storePendingLoginAuth({
           mode: 'login',

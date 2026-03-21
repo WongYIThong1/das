@@ -16,3 +16,11 @@ export function safeExternalHref(url: string | null | undefined): string | null 
     return null;
   }
 }
+
+export function buildAssetProxyUrl(url: string | null | undefined): string | null {
+  const safeUrl = safeExternalHref(url);
+  if (!safeUrl) {
+    return null;
+  }
+  return `/api/purchase-invoice/asset?url=${encodeURIComponent(safeUrl)}`;
+}

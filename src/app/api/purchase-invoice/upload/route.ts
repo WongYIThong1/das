@@ -37,9 +37,10 @@ export async function POST(request: Request) {
     }
     form.append('file', fileEntry);
 
+    const headers: Record<string, string> = { Authorization: authorization };
     const response = await fetch(upstreamUrl, {
       method: 'POST',
-      headers: { Authorization: authorization },
+      headers,
       body: form,
     });
 
@@ -49,8 +50,12 @@ export async function POST(request: Request) {
 
     if (!response.ok) {
       const err = (data as any) ?? {};
+      const payload =
+        err && typeof err === 'object'
+          ? err
+          : { error: err?.error ?? err?.message ?? (text.slice(0, 200) || 'upstream_error') };
       return NextResponse.json(
-        { error: err.error ?? err.message ?? (text.slice(0, 200) || 'upstream_error') },
+        payload,
         { status: response.status }
       );
     }

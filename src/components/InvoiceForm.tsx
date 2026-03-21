@@ -40,6 +40,13 @@ type FieldOption = {
   meta?: string;
 };
 
+type ResolvedWarning = {
+  code: string;
+  message: string;
+  field?: string;
+  line?: number;
+};
+
 const BLOCKING_WARNINGS = new Set<PreviewWarningCode>(['creditor_not_matched', 'missing_invoice_number', 'missing_invoice_date', 'missing_items']);
 const WARNING_COPY: Record<string, string> = {
   missing_invoice_number: 'Invoice number is missing',
@@ -62,6 +69,39 @@ function normalizeWarningCode(warning: unknown) {
   }
   if (warning == null) return 'unknown_warning';
   return String(warning);
+}
+
+function normalizeWarningObject(warning: unknown): ResolvedWarning {
+  if (typeof warning === 'string') {
+    return {
+      code: warning,
+      message: WARNING_COPY[warning] ?? warning,
+    };
+  }
+
+  if (warning && typeof warning === 'object') {
+    const record = warning as Record<string, unknown>;
+    const codeCandidate = record.code || record.warning || record.type || record.reason;
+    const code = typeof codeCandidate === 'string' && codeCandidate.trim()
+      ? codeCandidate
+      : normalizeWarningCode(warning);
+
+    const messageCandidate = record.message;
+    const message = typeof messageCandidate === 'string' && messageCandidate.trim()
+      ? messageCandidate
+      : (WARNING_COPY[code] ?? code);
+
+    const field = typeof record.field === 'string' && record.field.trim() ? record.field : undefined;
+    const line = typeof record.line === 'number' ? record.line : undefined;
+
+    return { code, message, field, line };
+  }
+
+  const code = normalizeWarningCode(warning);
+  return {
+    code,
+    message: WARNING_COPY[code] ?? code,
+  };
 }
 
 function createDraft(payload: PurchaseInvoicePreviewPayload): DraftPayload {
@@ -525,8 +565,8 @@ export function CreateInvoice({ preview, onBack, onSubmitted }: CreateInvoicePro
     setSelectedAgentOption(deriveAgentFieldOption(preview, nextDraft));
   }, [preview]);
 
-  const warnings = (preview.warnings ?? []).map(normalizeWarningCode);
-  const blockingWarnings = warnings.filter((warning) => BLOCKING_WARNINGS.has(warning));
+  const warnings = (preview.warnings ?? []).map(normalizeWarningObject);
+  const blockingWarnings = warnings.filter((warning) => BLOCKING_WARNINGS.has(warning.code));
   const canContinue = blockingWarnings.length === 0;
   const itemMatches = preview.matches?.items ?? [];
   const originalHref = useMemo(() => safeExternalHref(preview.file?.downloadUrl || preview.payload.externalLink), [preview.file?.downloadUrl, preview.payload.externalLink]);
@@ -1225,9 +1265,12 @@ export function CreateInvoice({ preview, onBack, onSubmitted }: CreateInvoicePro
                 </div>
               ) : (
                 <div className="mt-4 space-y-2">
-                  {warnings.map((warning) => {
-                    const critical = BLOCKING_WARNINGS.has(warning);
-                    return <div key={warning} className={`rounded-[1.5rem] border px-4 py-4 text-sm ${critical ? 'border-red-200 bg-red-50 text-red-700' : 'border-amber-200 bg-amber-50 text-amber-700'}`}><div className="flex items-start gap-3">{critical ? <ShieldAlert size={16} className="mt-0.5 shrink-0" /> : <AlertCircle size={16} className="mt-0.5 shrink-0" />}<div><p className="font-medium">{WARNING_COPY[warning] ?? warning}</p><p className="mt-1 text-xs leading-5 opacity-90">{critical ? 'This must be fixed before final create.' : 'Please verify this field before accepting the preview.'}</p></div></div></div>;
+                  {warnings.map((warning, index) => {
+                    const critical = BLOCKING_WARNINGS.has(warning.code);
+                    const suffix = warning.field ? ` (${warning.field})` : '';
+                    const lineTag = typeof warning.line === 'number' ? ` [Line ${warning.line}]` : '';
+                    const title = `${warning.message}${suffix}${lineTag}`;
+                    return <div key={`${warning.code}-${warning.field ?? ''}-${warning.line ?? ''}-${index}`} className={`rounded-[1.5rem] border px-4 py-4 text-sm ${critical ? 'border-red-200 bg-red-50 text-red-700' : 'border-amber-200 bg-amber-50 text-amber-700'}`}><div className="flex items-start gap-3">{critical ? <ShieldAlert size={16} className="mt-0.5 shrink-0" /> : <AlertCircle size={16} className="mt-0.5 shrink-0" />}<div><p className="font-medium">{title}</p><p className="mt-1 text-xs leading-5 opacity-90">Code: {warning.code}</p></div></div></div>;
                   })}
                 </div>
               )}

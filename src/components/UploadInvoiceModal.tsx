@@ -1,7 +1,7 @@
 'use client';
 
 import React, { useCallback, useEffect, useRef, useState } from 'react';
-import { X, UploadCloud, FileText, ImageIcon, Loader2, AlertCircle, Trash2, Check } from 'lucide-react';
+import { X, UploadCloud, FileText, ImageIcon, Loader2, AlertCircle, Trash2, Check, Camera, FolderOpen } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
 import { toast } from 'sonner';
 import { useRouter } from 'next/navigation';
@@ -95,6 +95,20 @@ function FileTypeBadge({ isImage }: { isImage: boolean }) {
   );
 }
 
+function formatErrorDetails(data: {
+  error?: string;
+  message?: string;
+  lastError?: string;
+  validationErrors?: Array<{ message?: string }>;
+  warnings?: Array<{ message?: string }>;
+} | null | undefined, fallback: string): string {
+  const validationMessage = data?.validationErrors?.map((e) => e.message).filter(Boolean).join('; ');
+  if (validationMessage) return validationMessage;
+  const warningMessage = data?.warnings?.map((w) => w.message).filter(Boolean).join('; ');
+  if (warningMessage) return warningMessage;
+  return data?.message || data?.lastError || data?.error || fallback;
+}
+
 export function UploadInvoiceModal({ isOpen, onClose, onBatchCreated }: UploadInvoiceModalProps) {
   const router = useRouter();
   const { accessToken } = useAuth();
@@ -106,6 +120,7 @@ export function UploadInvoiceModal({ isOpen, onClose, onBatchCreated }: UploadIn
   const [error, setError] = useState<string | null>(null);
   const abortRef = useRef<AbortController | null>(null);
   const dropRef = useRef<HTMLDivElement>(null);
+  const cameraInputRef = useRef<HTMLInputElement>(null);
 
   const reset = useCallback(() => {
     setFiles([]); setIsDragging(false);
@@ -161,6 +176,33 @@ export function UploadInvoiceModal({ isOpen, onClose, onBatchCreated }: UploadIn
     while (true) {
       if (signal.aborted) return;
       if (Date.now() - startedAt > POLL_TIMEOUT_MS) {
+        const finalRes = await authFetch(`/api/purchase-invoice/create/status?taskId=${encodeURIComponent(taskId)}`, {
+          cache: 'no-store', signal,
+        }).catch(() => null);
+        if (finalRes && 'ok' in finalRes && finalRes.ok) {
+          const finalData = await finalRes.json().catch(() => null) as {
+            status?: string;
+            error?: string;
+            lastError?: string;
+            message?: string;
+            taskId?: string;
+            fileServer?: { imageUrl?: string };
+            validationErrors?: Array<{ message?: string }>;
+            warnings?: Array<{ message?: string }>;
+          } | null;
+          if (finalData?.status === 'completed' || finalData?.status === 'completed_with_warnings') {
+            setPhase('done');
+            await new Promise((r) => setTimeout(r, 300));
+            router.push(`/purchase-invoice/${taskId}`);
+            onClose();
+            return;
+          }
+          if (finalData?.status === 'failed') {
+            const validationMessage = finalData.validationErrors?.map((e) => e.message).filter(Boolean).join('; ');
+            const warningMessage = finalData.warnings?.map((w) => w.message).filter(Boolean).join('; ');
+            throw new ApiRequestError(validationMessage || warningMessage || finalData.lastError || finalData.message || finalData.error || 'Processing failed.', 500, finalData);
+          }
+        }
         throw new ApiRequestError('Processing timed out. Please try again.', 408);
       }
 
@@ -179,7 +221,13 @@ export function UploadInvoiceModal({ isOpen, onClose, onBatchCreated }: UploadIn
       const d = (await res.json()) as { status?: string };
       const status = d.status ?? '';
 
-      if (status === 'failed') throw new ApiRequestError('Processing failed. Please try again.', 500);
+      if (status === 'failed') {
+        throw new ApiRequestError(
+          (d as any)?.lastError || (d as any)?.message || (d as any)?.error || 'Processing failed. Please try again.',
+          500,
+          d,
+        );
+      }
 
       if (status === 'completed' || status === 'completed_with_warnings') {
         setPhase('done');
@@ -213,11 +261,13 @@ export function UploadInvoiceModal({ isOpen, onClose, onBatchCreated }: UploadIn
         const data = (await res.json().catch(() => null)) as {
           groupId?: string;
           items?: Array<{ itemId?: string; taskId?: string; fileName?: string }>;
-          error?: string; message?: string;
+          error?: string; message?: string; lastError?: string;
+          validationErrors?: Array<{ message?: string }>;
+          warnings?: Array<{ message?: string }>;
         } | null;
         if (!res.ok) {
           console.error('[Batch upload] failed:', res.status, data);
-          throw new ApiRequestError((data as any)?.message ?? data?.error ?? 'Batch upload failed.', res.status);
+          throw new ApiRequestError(formatErrorDetails(data, 'Batch upload failed.'), res.status, data);
         }
 
         const groupId = data?.groupId;
@@ -243,12 +293,19 @@ export function UploadInvoiceModal({ isOpen, onClose, onBatchCreated }: UploadIn
         body: form,
         signal: ctrl.signal,
       });
-      const data = (await res.json().catch(() => null)) as { taskId?: string; error?: string; message?: string } | null;
+      const data = (await res.json().catch(() => null)) as {
+        taskId?: string;
+        error?: string;
+        message?: string;
+        lastError?: string;
+        validationErrors?: Array<{ message?: string }>;
+        warnings?: Array<{ message?: string }>;
+      } | null;
       if (!res.ok) {
         const msg = data?.error === 'service_unavailable' ? 'Service temporarily unavailable.' :
                     data?.error === 'invalid_request'     ? 'Invalid upload request.' :
-                    (data as any)?.message ?? data?.error ?? 'Upload failed. Please try again.';
-        throw new ApiRequestError(msg, res.status);
+                    formatErrorDetails(data, 'Upload failed. Please try again.');
+        throw new ApiRequestError(msg, res.status, data);
       }
       if (!data?.taskId) throw new ApiRequestError('Unexpected server response.', 500);
 
@@ -409,30 +466,57 @@ export function UploadInvoiceModal({ isOpen, onClose, onBatchCreated }: UploadIn
                     className="space-y-3"
                   >
                     {!hasFiles ? (
-                      <div
-                        ref={dropRef}
-                        onDragOver={onDragOver}
-                        onDragLeave={onDragLeave}
-                        onDrop={onDrop}
-                        className={`relative flex flex-col items-center justify-center rounded-xl border-2 border-dashed px-6 py-12 text-center transition-all duration-150 ${
-                          isDragging ? 'border-zinc-400 bg-zinc-50' : 'border-zinc-200 bg-zinc-50/50 hover:border-zinc-300 hover:bg-zinc-50'
-                        }`}
-                      >
-                        <input type="file" multiple accept=".pdf,.png,.jpg,.jpeg,.webp" onChange={onFileInput} className="absolute inset-0 cursor-pointer opacity-0" />
-                        <div className={`mb-5 flex h-14 w-14 items-center justify-center rounded-2xl transition-all duration-150 ${
-                          isDragging ? 'bg-zinc-200 text-zinc-600 scale-110' : 'bg-white text-zinc-400 shadow-sm ring-1 ring-zinc-200'
-                        }`}>
-                          <UploadCloud size={26} />
+                      <>
+                        <div
+                          ref={dropRef}
+                          onDragOver={onDragOver}
+                          onDragLeave={onDragLeave}
+                          onDrop={onDrop}
+                          className={`relative flex flex-col items-center justify-center rounded-xl border-2 border-dashed px-6 py-12 text-center transition-all duration-150 ${
+                            isDragging ? 'border-zinc-400 bg-zinc-50' : 'border-zinc-200 bg-zinc-50/50 hover:border-zinc-300 hover:bg-zinc-50'
+                          }`}
+                        >
+                          <input type="file" multiple accept=".pdf,.png,.jpg,.jpeg,.webp" onChange={onFileInput} className="absolute inset-0 cursor-pointer opacity-0" />
+                          <div className={`mb-5 flex h-14 w-14 items-center justify-center rounded-2xl transition-all duration-150 ${
+                            isDragging ? 'bg-zinc-200 text-zinc-600 scale-110' : 'bg-white text-zinc-400 shadow-sm ring-1 ring-zinc-200'
+                          }`}>
+                            <UploadCloud size={26} />
+                          </div>
+                          <p className="text-sm font-semibold text-zinc-700">{isDragging ? 'Release to add files' : 'Drop files here'}</p>
+                          <p className="mt-1.5 text-xs text-zinc-400">or click to browse</p>
+                          <div className="mt-6 flex items-center gap-1.5">
+                            {['PDF', 'PNG', 'JPG', 'WEBP'].map((fmt) => (
+                              <span key={fmt} className="rounded-md bg-white px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wider text-zinc-400 ring-1 ring-zinc-200">{fmt}</span>
+                            ))}
+                            <span className="ml-1 text-[10px] text-zinc-300">· 20 MB max</span>
+                          </div>
                         </div>
-                        <p className="text-sm font-semibold text-zinc-700">{isDragging ? 'Release to add files' : 'Drop files here'}</p>
-                        <p className="mt-1.5 text-xs text-zinc-400">or <span className="underline underline-offset-2">click to browse</span></p>
-                        <div className="mt-6 flex items-center gap-1.5">
-                          {['PDF', 'PNG', 'JPG', 'WEBP'].map((fmt) => (
-                            <span key={fmt} className="rounded-md bg-white px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wider text-zinc-400 ring-1 ring-zinc-200">{fmt}</span>
-                          ))}
-                          <span className="ml-1 text-[10px] text-zinc-300">· 20 MB max</span>
+
+                        {/* Action buttons */}
+                        <div className="mt-3 flex gap-2">
+                          <input
+                            ref={cameraInputRef}
+                            type="file"
+                            accept="image/*"
+                            capture="environment"
+                            onChange={onFileInput}
+                            className="hidden"
+                          />
+                          <button
+                            type="button"
+                            onClick={() => cameraInputRef.current?.click()}
+                            className="flex flex-1 items-center justify-center gap-2 rounded-xl border border-zinc-200 bg-white px-4 py-2.5 text-sm font-medium text-zinc-700 shadow-sm transition hover:border-zinc-300 hover:bg-zinc-50"
+                          >
+                            <Camera size={15} />
+                            Take Photo
+                          </button>
+                          <label className="flex flex-1 cursor-pointer items-center justify-center gap-2 rounded-xl border border-zinc-200 bg-white px-4 py-2.5 text-sm font-medium text-zinc-700 shadow-sm transition hover:border-zinc-300 hover:bg-zinc-50">
+                            <input type="file" multiple accept=".pdf,.png,.jpg,.jpeg,.webp" onChange={onFileInput} className="sr-only" />
+                            <FolderOpen size={15} />
+                            Choose Files
+                          </label>
                         </div>
-                      </div>
+                      </>
                     ) : (
                       <>
                         <label

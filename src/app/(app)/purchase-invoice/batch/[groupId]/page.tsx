@@ -66,14 +66,30 @@ const ACTIVE_PHASES   = new Set<BatchItemPhase>([
 const TERMINAL_PHASES = new Set<BatchItemPhase>(['succeeded', 'failed', 'canceled', 'cancelled', 'submitted', 'submit_failed', 'not_ready']);
 const SUBMIT_PHASES   = new Set<BatchItemPhase>(['submit_queued', 'submitting_stock', 'submitting_pi', 'submitted', 'submit_failed', 'not_ready']);
 
-function mapStatus(status: string): BatchItemPhase {
+function mapStatus(status: string): BatchItemPhase | null {
   switch (status) {
-    case 'queued': case 'processing': case 'fileserver_uploading': return 'queued';
-    case 'ocrprocessing':  return 'ocr_processing';
+    case 'queued':
+    case 'uploaded':
+    case 'processing':
+    case 'fileserver_uploading':
+      return 'queued';
+    case 'ocr_started':
+    case 'ocr_completed':
+    case 'ocrprocessing':
+      return 'ocr_processing';
     case 'reanalyze_queued': case 'reanalyzing': return 'ocr_processing';
-    case 'aianalyzing':    return 'analyzing';
-    case 'completed': case 'completed_with_warnings': return 'succeeded';
-    case 'failed':    return 'failed';
+    case 'draft_ready':
+    case 'analyzing':
+    case 'aianalyzing':
+      return 'analyzing';
+    case 'completed':
+    case 'completed_with_warnings':
+    case 'succeeded':
+    case 'success':
+      return 'succeeded';
+    case 'failed':
+    case 'error':
+      return 'failed';
     case 'canceled':  return 'canceled';
     case 'cancelled': return 'cancelled';
     case 'submit_queued':    return 'submit_queued';
@@ -82,7 +98,7 @@ function mapStatus(status: string): BatchItemPhase {
     case 'submitted':        return 'submitted';
     case 'submit_failed':    return 'submit_failed';
     case 'not_ready':        return 'not_ready';
-    default: return 'queued';
+    default: return null;
   }
 }
 
@@ -151,25 +167,32 @@ export default function BatchGroupPage() {
           }>;
         };
 
-        const mapped: BatchStatusItem[] = (data.items ?? []).map((item) => {
-          const phase = mapStatus(item.status ?? '');
-          const analysisPhase = item.analysisStatus ? mapStatus(item.analysisStatus) : (phase === 'succeeded' ? 'succeeded' : undefined);
-          return {
-            id: item.itemId ?? item.taskId ?? '',
-            fileName: item.fileName ?? item.itemId ?? '',
-            fileSize: 0,
-            phase,
-            analysisPhase,
-            previewTaskId: item.taskId ?? item.itemId ?? null,
-            startedAt: parseTs(item.startedAt),
-            completedAt: parseTs(item.completedAt),
-            error: null,
-            warningCount: 0,
-            downloadUrl: undefined,
-          };
+        let mapped: BatchStatusItem[] = [];
+        setItems((prev) => {
+          const prevById = new Map(prev.map((it) => [it.id, it]));
+          mapped = (data.items ?? []).map((item) => {
+            const id = item.itemId ?? item.taskId ?? '';
+            const previous = prevById.get(id);
+            const mappedPhase = mapStatus(item.status ?? '');
+            const phase = mappedPhase ?? previous?.phase ?? 'queued';
+            const mappedAnalysisPhase = item.analysisStatus ? mapStatus(item.analysisStatus) : null;
+            const analysisPhase = mappedAnalysisPhase ?? (phase === 'succeeded' ? 'succeeded' : previous?.analysisPhase);
+            return {
+              id,
+              fileName: item.fileName ?? item.itemId ?? previous?.fileName ?? '',
+              fileSize: 0,
+              phase,
+              analysisPhase,
+              previewTaskId: item.taskId ?? item.itemId ?? previous?.previewTaskId ?? null,
+              startedAt: parseTs(item.startedAt) ?? previous?.startedAt ?? null,
+              completedAt: parseTs(item.completedAt) ?? previous?.completedAt ?? null,
+              error: null,
+              warningCount: 0,
+              downloadUrl: undefined,
+            };
+          });
+          return mapped.length > 0 ? mapped : prev;
         });
-
-        if (mapped.length > 0) setItems(mapped);
         setNow(Date.now());
         setError(null);
 

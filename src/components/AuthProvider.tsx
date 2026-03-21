@@ -16,6 +16,9 @@ import { registerAuthStore } from '../lib/auth-fetch';
 
 const AuthContext = createContext<AuthContextValue | null>(null);
 const ACTIVE_INVITE_STORAGE_KEY = 'auth.activeInviteCode';
+const AUTH_REFRESH_LOCK_NAME = 'auth-refresh';
+const AUTH_REFRESH_LEASE_KEY = 'auth.refresh.lease';
+const AUTH_REFRESH_LEASE_TTL_MS = 20_000;
 
 function parseJwtExpiry(accessToken: string) {
   const payloadSegment = accessToken.split('.')[1];
@@ -49,6 +52,67 @@ function readActiveInviteCode() {
   return window.sessionStorage.getItem(ACTIVE_INVITE_STORAGE_KEY);
 }
 
+async function withAuthRefreshLock<T>(task: () => Promise<T>): Promise<T> {
+  if (typeof navigator !== 'undefined') {
+    const locks = (navigator as Navigator & { locks?: LockManager }).locks;
+    if (locks?.request) {
+      return locks.request(AUTH_REFRESH_LOCK_NAME, { mode: 'exclusive' }, task);
+    }
+  }
+
+  if (typeof window === 'undefined') {
+    return task();
+  }
+
+  const leaseId = (globalThis.crypto?.randomUUID?.() ?? `lease_${Date.now()}_${Math.random().toString(16).slice(2)}`);
+
+  const readLease = () => {
+    try {
+      const raw = window.localStorage.getItem(AUTH_REFRESH_LEASE_KEY);
+      if (!raw) return null;
+      const parsed = JSON.parse(raw) as { id?: unknown; expiresAt?: unknown } | null;
+      if (typeof parsed?.id !== 'string' || typeof parsed?.expiresAt !== 'number') return null;
+      return parsed.id && parsed.expiresAt > Date.now() ? parsed : null;
+    } catch {
+      return null;
+    }
+  };
+
+  const acquireLease = async () => {
+    while (true) {
+      const current = readLease();
+      if (!current) {
+        const next = JSON.stringify({ id: leaseId, expiresAt: Date.now() + AUTH_REFRESH_LEASE_TTL_MS });
+        try {
+          window.localStorage.setItem(AUTH_REFRESH_LEASE_KEY, next);
+        } catch {
+          return;
+        }
+        const confirmed = readLease();
+        if (confirmed && confirmed.id === leaseId) {
+          return;
+        }
+      }
+
+      await new Promise((resolve) => window.setTimeout(resolve, 100));
+    }
+  };
+
+  await acquireLease();
+  try {
+    return await task();
+  } finally {
+    try {
+      const current = readLease();
+      if (current && current.id === leaseId) {
+        window.localStorage.removeItem(AUTH_REFRESH_LEASE_KEY);
+      }
+    } catch {
+      // Ignore release failures.
+    }
+  }
+}
+
 export function AuthProvider({ children }: { children: React.ReactNode }) {
   const [profile, setProfileState] = useState<ProfileResponse | null>(null);
   const [authStatus, setAuthStatus] = useState<AuthStatus>('unknown');
@@ -57,6 +121,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   const [pendingAuthFlow, setPendingAuthFlowState] = useState<PendingAuthFlow | null>(null);
   const [activeInviteCode, setActiveInviteCodeState] = useState<string | null>(() => readActiveInviteCode());
   const authRevisionRef = useRef(0);
+  const refreshInFlightRef = useRef<Promise<AuthSessionResponse | null> | null>(null);
   // Ref keeps the latest token accessible synchronously from the auth store
   // without needing to re-register on every token change.
   const accessTokenRef = useRef<string | null>(null);
@@ -115,38 +180,59 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     }
   }, []);
 
-  const refreshProfile = useCallback(async (options?: { silent?: boolean }) => {
+  const refreshSessionOnce = useCallback(async (options?: { silent?: boolean }) => {
+    if (refreshInFlightRef.current) {
+      return refreshInFlightRef.current;
+    }
+
     const refreshRevision = authRevisionRef.current;
     if (!options?.silent) {
       setAuthStatus('loading');
     }
-    try {
-      const session = await refreshSession();
-      if (refreshRevision !== authRevisionRef.current) {
-        return profile;
-      }
-      const nextProfile = mapSessionUserToProfile(session.user);
-      setAccessTokenState(session.accessToken);
-      setAccessTokenExpiresAt(resolveAccessTokenExpiry(session));
-      setProfileState(nextProfile);
-      setAuthStatus('authenticated');
-      return nextProfile;
-    } catch (err) {
-      if (refreshRevision !== authRevisionRef.current) {
-        return profile;
-      }
-      const isDefinitiveAuthFailure = err instanceof ApiRequestError && (err.status === 401 || err.status === 403);
-      if (!options?.silent || isDefinitiveAuthFailure) {
-        setAccessTokenState(null);
-        setAccessTokenExpiresAt(null);
-        setProfileState(null);
-        setAuthStatus('unauthenticated');
+
+    const refreshPromise = withAuthRefreshLock(async () => {
+      try {
+        const session = await refreshSession();
+        if (refreshRevision !== authRevisionRef.current) {
+          return session;
+        }
+        const nextProfile = mapSessionUserToProfile(session.user);
+        setAccessTokenState(session.accessToken);
+        setAccessTokenExpiresAt(resolveAccessTokenExpiry(session));
+        setProfileState(nextProfile);
+        setAuthStatus('authenticated');
+        return session;
+      } catch (err) {
+        if (refreshRevision !== authRevisionRef.current) {
+          return null;
+        }
+        const isDefinitiveAuthFailure = err instanceof ApiRequestError && (err.status === 401 || err.status === 403);
+        if (!options?.silent || isDefinitiveAuthFailure) {
+          setAccessTokenState(null);
+          setAccessTokenExpiresAt(null);
+          setProfileState(null);
+          setAuthStatus('unauthenticated');
+          return null;
+        }
+        // Silent refresh hit a transient error (network, 5xx, etc.) — keep the user logged in.
         return null;
       }
-      // Silent refresh hit a transient error (network, 5xx, etc.) — keep the user logged in.
-      return profile;
+    });
+
+    refreshInFlightRef.current = refreshPromise;
+    try {
+      return await refreshPromise;
+    } finally {
+      if (refreshInFlightRef.current === refreshPromise) {
+        refreshInFlightRef.current = null;
+      }
     }
-  }, [profile]);
+  }, []);
+
+  const refreshProfile = useCallback(async (options?: { silent?: boolean }) => {
+    const session = await refreshSessionOnce(options);
+    return session ? mapSessionUserToProfile(session.user) : null;
+  }, [refreshSessionOnce]);
 
   // Register the auth store once so authFetch() can automatically refresh
   // expired tokens and retry failed requests without involving components.
@@ -155,18 +241,12 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     registerAuthStore({
       getToken: () => accessTokenRef.current,
       refresh: async () => {
-        try {
-          const session = await refreshSession();
-          // Update React state so the rest of the app stays in sync.
-          setSession(session);
-          return session.accessToken;
-        } catch {
-          return null;
-        }
+        const session = await refreshSessionOnce({ silent: true });
+        return session?.accessToken ?? null;
       },
     });
   // Empty deps: the store uses refs/stable callbacks, no need to re-register.
-  }, []); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [refreshSessionOnce]); // eslint-disable-line react-hooks/exhaustive-deps
 
   useEffect(() => {
     if (authStatus !== 'authenticated' || !accessTokenExpiresAt) {

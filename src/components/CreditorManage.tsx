@@ -3,7 +3,7 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   ChevronRight,
-  Pencil,
+  Eye,
   Trash2,
   Hash,
   Building2,
@@ -33,6 +33,7 @@ import type {
   GetCreditorListParams,
 } from '../lib/creditor-api';
 import { getCreditorList } from '../lib/creditor-api';
+import CreditorDetailModal from './CreditorDetailModal';
 
 
 type SortOption = {
@@ -101,6 +102,8 @@ export function CreditorManage() {
   const [isPrefetchingNextPage, setIsPrefetchingNextPage] = useState(false);
   const [initialError, setInitialError] = useState<string | null>(null);
   const [nextPageError, setNextPageError] = useState<string | null>(null);
+  const [detailModalOpen, setDetailModalOpen] = useState(false);
+  const [detailCode, setDetailCode] = useState('');
   const displayMenuRef = useRef<HTMLDivElement>(null);
   const scrollContainerRef = useRef<HTMLDivElement | null>(null);
   const loadMoreRef = useRef<HTMLDivElement | null>(null);
@@ -136,7 +139,7 @@ export function CreditorManage() {
   const fetchCreditors = useCallback(
     async (page: number, query: CreditorQuery) => {
       if (!profile || !accessToken) {
-        throw new ApiRequestError('Your session is not ready yet.', 401);
+        throw new ApiRequestError('Your session is not ready yet.', 503);
       }
 
       return getCreditorList({
@@ -505,7 +508,7 @@ export function CreditorManage() {
 
     return (
       <>
-        <table className="w-full text-left text-[11px]">
+        <table className="w-full min-w-[640px] text-left text-[11px]">
           <thead className="sticky top-0 z-10 bg-white shadow-sm">
             <tr>
               <th className="bg-white pl-6 pr-3 py-1.5 font-semibold uppercase tracking-tight text-zinc-500">
@@ -610,12 +613,13 @@ export function CreditorManage() {
                 <td className="pl-3 pr-6 py-1.5">
                   <div className="flex items-center gap-2">
                     <button
-                      disabled
-                      className="flex cursor-not-allowed items-center gap-1 rounded border border-zinc-200 bg-zinc-50 px-1.5 py-0.5 text-zinc-400 shadow-sm"
-                      title="Temporarily disabled"
+                      type="button"
+                      onClick={() => { setDetailCode(creditor.code); setDetailModalOpen(true); }}
+                      className="flex items-center gap-1 rounded border border-zinc-200 bg-white px-1.5 py-0.5 text-zinc-900 shadow-sm transition-all hover:border-zinc-300 hover:bg-zinc-50"
+                      title="View"
                     >
-                      <Pencil size={10} />
-                      <span className="text-[10px] font-semibold">Edit</span>
+                      <Eye size={10} />
+                      <span className="text-[10px] font-semibold">View</span>
                     </button>
                     <button
                       disabled
@@ -837,6 +841,12 @@ export function CreditorManage() {
       <div ref={scrollContainerRef} className="flex-1 overflow-auto">
         {renderTable()}
       </div>
+
+      <CreditorDetailModal
+        isOpen={detailModalOpen}
+        code={detailCode}
+        onClose={() => setDetailModalOpen(false)}
+      />
     </motion.div>
   );
 }

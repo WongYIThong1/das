@@ -157,8 +157,67 @@ export type PurchaseInvoicePreviewTaskResponse = {
   file?: PurchaseInvoicePreviewFile;
   result?: PurchaseInvoicePreviewResponse;
   error?: string;
+  message?: string;
+  lastError?: string;
+  warnings?: unknown[];
+  validationErrors?: unknown[];
   draftId?: string;
 };
+
+function derivePreviewImageUrl(fileServer?: { code?: string; link?: string; imageUrl?: string } | null) {
+  if (fileServer?.imageUrl) {
+    return fileServer.imageUrl;
+  }
+
+  if (fileServer?.link) {
+    try {
+      const linkUrl = new URL(fileServer.link);
+      if (linkUrl.pathname.startsWith('/files/')) {
+        const previewUrl = new URL(linkUrl.toString());
+        previewUrl.pathname = linkUrl.pathname.replace(/^\/files\//, '/images/');
+        return previewUrl.toString();
+      }
+    } catch {
+      return null;
+    }
+  }
+
+  if (fileServer?.code && fileServer.link) {
+    try {
+      const linkUrl = new URL(fileServer.link);
+      return `${linkUrl.origin}/images/${encodeURIComponent(fileServer.code)}`;
+    } catch {
+      return null;
+    }
+  }
+
+  return null;
+}
+
+type PreviewErrorPayload = {
+  error?: string;
+  message?: string;
+  warnings?: unknown[];
+  validationErrors?: unknown[];
+  lastError?: string;
+};
+
+function formatPreviewErrorMessage(payload: PreviewErrorPayload | null, fallback: string): string {
+  const validationMessage = payload?.validationErrors
+    ?.map((e) => (e && typeof e === 'object' ? String((e as Record<string, unknown>).message ?? '') : ''))
+    .filter(Boolean)
+    .join('; ');
+  if (validationMessage) return validationMessage;
+  const warningMessage = payload?.warnings
+    ?.map((w) => (w && typeof w === 'object' ? String((w as Record<string, unknown>).message ?? '') : ''))
+    .filter(Boolean)
+    .join('; ');
+  if (warningMessage) return warningMessage;
+  if (payload?.message?.trim()) return payload.message;
+  if (payload?.lastError?.trim()) return payload.lastError;
+  if (payload?.error?.trim()) return payload.error;
+  return fallback;
+}
 
 export type PurchaseInvoicePickerPage<T> = {
   page: number;
@@ -570,6 +629,107 @@ export async function getStockOptions(
   };
 }
 
+export type DraftStockGroupOption = Record<string, unknown> & {
+  itemGroup?: string;
+  shortCode?: string;
+  purchaseCode?: string;
+  description?: string;
+  itemGroupDescription?: string;
+  generatedItemCode?: string;
+};
+
+export type DraftTaxCodeOption = Record<string, unknown> & {
+  taxCode?: string;
+  purchaseTaxCode?: string;
+  description?: string;
+  name?: string;
+};
+
+export async function getDraftStockGroupOptions(
+  accessToken?: string
+): Promise<DraftStockGroupOption[]> {
+  const headers: Record<string, string> = {};
+  if (accessToken) headers['Authorization'] = `Bearer ${accessToken}`;
+
+  const response = await authFetch('/api/draft/stockgroup', {
+    method: 'GET',
+    headers,
+    cache: 'no-store',
+  });
+
+  if (!response.ok) {
+    const payload = (await response.json().catch(() => null)) as { error?: string } | null;
+    throw new ApiRequestError(payload?.error ?? 'Failed to load stock groups.', response.status);
+  }
+
+  const data = (await response.json()) as
+    | DraftStockGroupOption[]
+    | { items?: DraftStockGroupOption[]; stockGroups?: DraftStockGroupOption[] };
+
+  if (Array.isArray(data)) {
+    return data;
+  }
+
+  return data.items ?? data.stockGroups ?? [];
+}
+
+export async function getDraftStockGroupDetail(
+  itemGroup: string,
+  accessToken?: string
+): Promise<DraftStockGroupOption | null> {
+  const headers: Record<string, string> = {};
+  if (accessToken) headers['Authorization'] = `Bearer ${accessToken}`;
+
+  const response = await authFetch(`/api/draft/stockgroup?itemGroup=${encodeURIComponent(itemGroup)}`, {
+    method: 'GET',
+    headers,
+    cache: 'no-store',
+  });
+
+  if (!response.ok) return null;
+
+  const data = (await response.json()) as { stockGroup?: unknown } | DraftStockGroupOption | null;
+  if (!data) return null;
+  if (
+    typeof data === 'object' &&
+    data !== null &&
+    'stockGroup' in data &&
+    data.stockGroup &&
+    typeof data.stockGroup === 'object'
+  ) {
+    return data.stockGroup as DraftStockGroupOption;
+  }
+  return data as DraftStockGroupOption;
+}
+
+export async function getDraftTaxCodeOptions(
+  accessToken?: string
+): Promise<DraftTaxCodeOption[]> {
+  const headers: Record<string, string> = {};
+  if (accessToken) headers['Authorization'] = `Bearer ${accessToken}`;
+
+  const response = await authFetch('/api/draft/taxcode', {
+    method: 'GET',
+    headers,
+    cache: 'no-store',
+  });
+
+  if (!response.ok) {
+    const payload = (await response.json().catch(() => null)) as { error?: string } | null;
+    throw new ApiRequestError(payload?.error ?? 'Failed to load tax codes.', response.status);
+  }
+
+  const data = (await response.json()) as
+    | DraftTaxCodeOption[]
+    | { items?: DraftTaxCodeOption[]; taxCodes?: DraftTaxCodeOption[] };
+
+  if (Array.isArray(data)) {
+    return data;
+  }
+
+  return data.items ?? data.taxCodes ?? [];
+}
+
 // ─── Detail fetchers ─────────────────────────────────────────────────────────
 
 export type CreditorDetail = {
@@ -678,8 +838,8 @@ export async function createPurchaseInvoicePreviewTask(
   });
 
   if (!response.ok) {
-    const payload = (await response.json().catch(() => null)) as { error?: string } | null;
-    throw new ApiRequestError(payload?.error ?? 'Upload failed.', response.status);
+    const payload = (await response.json().catch(() => null)) as PreviewErrorPayload | null;
+    throw new ApiRequestError(formatPreviewErrorMessage(payload, 'Upload failed.'), response.status, payload);
   }
 
   const data = (await response.json()) as { taskId?: string; status?: string };
@@ -707,8 +867,8 @@ export async function getPurchaseInvoicePreviewTask(
   );
 
   if (!response.ok) {
-    const payload = (await response.json().catch(() => null)) as { error?: string } | null;
-    throw new ApiRequestError(payload?.error ?? 'Preview task not found.', response.status);
+    const payload = (await response.json().catch(() => null)) as PreviewErrorPayload | null;
+    throw new ApiRequestError(formatPreviewErrorMessage(payload, 'Preview task not found.'), response.status, payload);
   }
 
   const data = (await response.json()) as {
@@ -719,11 +879,14 @@ export async function getPurchaseInvoicePreviewTask(
     draft?: DraftApiResponse;
     warnings?: unknown[];
     error?: string;
+    message?: string;
+    lastError?: string;
+    validationErrors?: unknown[];
   };
 
   const mappedStatus = mapBackendStatus(data.status ?? '');
   const externalLink = data.fileServer?.link ?? data.draft?.header?.externalLink;
-  const imageUrl = data.fileServer?.imageUrl;
+  const imageUrl = derivePreviewImageUrl(data.fileServer);
 
   // When completed, map the inline draft directly — no separate draft endpoint needed.
   let result: PurchaseInvoicePreviewResponse | undefined;
@@ -748,6 +911,10 @@ export async function getPurchaseInvoicePreviewTask(
     imageUrl,
     result,
     error: data.error,
+    message: data.message,
+    lastError: data.lastError,
+    warnings: data.warnings,
+    validationErrors: data.validationErrors,
   };
 }
 
@@ -769,8 +936,8 @@ export async function reanalyzePurchaseInvoicePreviewTask(
   });
 
   if (!response.ok) {
-    const payload = (await response.json().catch(() => null)) as { error?: string } | null;
-    throw new ApiRequestError(payload?.error ?? 'Reanalyze failed.', response.status);
+    const payload = (await response.json().catch(() => null)) as PreviewErrorPayload | null;
+    throw new ApiRequestError(formatPreviewErrorMessage(payload, 'Reanalyze failed.'), response.status, payload);
   }
 
   // Reanalyze returns { taskId, status: 'reanalyze_queued' } — treat as queued/processing
@@ -832,9 +999,35 @@ async function waitForPreviewViaPolling(
       throw new ApiRequestError('Preview completed but draft data is unavailable.', 500);
     }
 
-    if (task.status === 'failed') throw new ApiRequestError(task.error || 'Preview failed.', 500);
+    if (task.status === 'failed') {
+      throw new ApiRequestError(
+        task.error || task.lastError || 'Preview failed.',
+        500,
+        { error: task.error, lastError: task.lastError, warnings: task.warnings, validationErrors: task.validationErrors },
+      );
+    }
 
-    if (Date.now() - startedAt > timeoutMs) throw new ApiRequestError('Preview timed out. Please try again.', 408);
+    if (Date.now() - startedAt > timeoutMs) {
+      const finalTask = await getPurchaseInvoicePreviewTask(taskId, {
+        signal: options?.signal,
+        accessToken: options?.accessToken,
+      }).catch(() => null);
+      if (finalTask?.status === 'succeeded' && finalTask.result) {
+        return { taskId: finalTask.taskId, draftId: finalTask.draftId, ...finalTask.result, sourceFileName: fileName };
+      }
+      if (finalTask?.status === 'failed') {
+        throw new ApiRequestError(
+          finalTask.error || finalTask.lastError || 'Preview failed.',
+          500,
+          { error: finalTask.error, lastError: finalTask.lastError, warnings: finalTask.warnings, validationErrors: finalTask.validationErrors },
+        );
+      }
+      throw new ApiRequestError(
+        finalTask?.lastError || finalTask?.error || 'Preview timed out. Please try again.',
+        408,
+        finalTask ? { error: finalTask.error, lastError: finalTask.lastError, warnings: finalTask.warnings, validationErrors: finalTask.validationErrors } : undefined,
+      );
+    }
 
     await new Promise((resolve) => window.setTimeout(resolve, intervalMs));
   }

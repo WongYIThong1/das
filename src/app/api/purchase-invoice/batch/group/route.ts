@@ -18,9 +18,10 @@ export async function GET(request: Request) {
   upstreamUrl.search = incomingUrl.search;
 
   try {
+    const headers: Record<string, string> = { Authorization: authorization };
     const response = await fetch(upstreamUrl, {
       method: 'GET',
-      headers: { Authorization: authorization },
+      headers,
       cache: 'no-store',
     });
     const data = (await response.json().catch(() => null)) as unknown;

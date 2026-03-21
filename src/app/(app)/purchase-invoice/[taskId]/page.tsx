@@ -1,7 +1,7 @@
 'use client';
 
-import React, { useState, useEffect } from 'react';
-import { Calendar as CalendarIcon, ChevronDown, Plus, Trash2, Waves, Loader2, Edit3, Download, LayoutList } from 'lucide-react';
+import React, { useState, useEffect, useRef } from 'react';
+import { Calendar as CalendarIcon, ChevronDown, Plus, Trash2, Waves, Loader2, Edit3, Download, LayoutList, Check } from 'lucide-react';
 import Link from 'next/link';
 import { useParams, useRouter } from 'next/navigation';
 import { toast } from 'sonner';
@@ -11,7 +11,7 @@ import { RefreshCcw } from 'lucide-react';
 import { Select, SelectContent, SelectGroup, SelectItem, SelectLabel, SelectScrollDownButton, SelectScrollUpButton, SelectSeparator, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
 import { Calendar } from "@/components/ui/calendar";
-import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter } from "@/components/ui/dialog";
+import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter, DialogDescription } from "@/components/ui/dialog";
 import { Command, CommandInput, CommandList, CommandEmpty, CommandGroup, CommandItem } from "@/components/ui/command";
 import { Badge } from "@/components/ui/badge";
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip";
@@ -19,7 +19,25 @@ import { cn } from "@/lib/utils";
 import { safeExternalHref } from '@/lib/safe-url';
 import { Search, AlertTriangle } from 'lucide-react';
 
-import { waitForPurchaseInvoicePreview, type PreviewTaskStatus, PurchaseInvoicePreviewPayload, PurchaseInvoicePreviewDetail, getCreditorOptions, getAgentOptions, getStockOptions, getCreditorDetail, getStockDetail, type PurchaseInvoicePreviewMatches, type PreviewProposedNewItem } from '../../../../lib/purchase-invoice-create-api';
+import {
+  waitForPurchaseInvoicePreview,
+  getPurchaseInvoicePreviewTask,
+  type PreviewTaskStatus,
+  PurchaseInvoicePreviewPayload,
+  PurchaseInvoicePreviewDetail,
+  getCreditorOptions,
+  getAgentOptions,
+  getStockOptions,
+  getDraftStockGroupOptions,
+  getDraftStockGroupDetail,
+  getDraftTaxCodeOptions,
+  getCreditorDetail,
+  getStockDetail,
+  type PurchaseInvoicePreviewMatches,
+  type PreviewProposedNewItem,
+  type DraftStockGroupOption,
+  type DraftTaxCodeOption,
+} from '../../../../lib/purchase-invoice-create-api';
 import { type PurchaseInvoiceSubmitRequest } from '../../../../lib/purchase-invoice-submit-api';
 import { useAuth } from '../../../../components/AuthProvider';
 import { authFetch } from '../../../../lib/auth-fetch';
@@ -27,7 +45,31 @@ import { useSubmit } from '../../../../components/SubmitProvider';
 import { usePreviewProgress } from '../../../../components/PreviewProgressProvider';
 import { BatchStatusModal, type BatchStatusItem } from '../../../../components/BatchStatusModal';
 
-export default function PurchaseInvoiceTaskPage({ taskIdOverride, isGroup = false, groupId: groupIdProp, earlyImageUrlOverride }: { taskIdOverride?: string; isGroup?: boolean; groupId?: string; earlyImageUrlOverride?: string } = {}) {
+type PurchaseInvoiceTaskPageProps = {
+  taskIdOverride?: string;
+  isGroup?: boolean;
+  groupId?: string;
+  earlyImageUrlOverride?: string;
+  groupItemIdOverride?: string;
+  onGroupItemResolved?: (next: { groupId?: string; taskId?: string; imageUrl?: string }) => void;
+};
+
+function buildAssetProxyUrl(url: string | null | undefined): string | null {
+  const safeUrl = safeExternalHref(url);
+  if (!safeUrl) {
+    return null;
+  }
+  return `/api/purchase-invoice/asset?url=${encodeURIComponent(safeUrl)}`;
+}
+
+export default function PurchaseInvoiceTaskPage({
+  taskIdOverride,
+  isGroup = false,
+  groupId: groupIdProp,
+  earlyImageUrlOverride,
+  groupItemIdOverride,
+  onGroupItemResolved,
+}: PurchaseInvoiceTaskPageProps = {}) {
   const params = useParams();
   const router = useRouter();
   const taskId = taskIdOverride ?? (params.taskId as string);
@@ -41,16 +83,19 @@ export default function PurchaseInvoiceTaskPage({ taskIdOverride, isGroup = fals
   const [loadNonce, setLoadNonce] = useState(0);
   const [payload, setPayload] = useState<PurchaseInvoicePreviewPayload | null>(null);
   const [editingItemIndex, setEditingItemIndex] = useState<number | null>(null);
+  const [manuallyAddedRows, setManuallyAddedRows] = useState<Record<number, boolean>>({});
   const [warnings, setWarnings] = useState<unknown[]>([]);
   const [taskStatus, setTaskStatus] = useState<PreviewTaskStatus | null>(null);
   const [draftId, setDraftId] = useState<string>('');
   const [earlyDownloadUrl, setEarlyDownloadUrl] = useState<string | null>(null);
   const [earlyExternalLink, setEarlyExternalLink] = useState<string | null>(null);
   const [earlyImageUrl, setEarlyImageUrl] = useState<string | null>(earlyImageUrlOverride ?? null);
+  const [isRefreshingOriginal, setIsRefreshingOriginal] = useState(false);
   const [previewMode, setPreviewMode] = useState<'form' | 'original'>('form');
   const [matches, setMatches] = useState<PurchaseInvoicePreviewMatches>({});
 
   const [createItemsEnabled, setCreateItemsEnabled] = useState<Record<number, boolean>>({});
+  const [manualAutoCreateEnabled, setManualAutoCreateEnabled] = useState<Record<number, boolean>>({});
   const [isStatsModalOpen, setIsStatsModalOpen] = useState(false);
   const [deletingItemIndex, setDeletingItemIndex] = useState<number | null>(null);
   const [groupItems, setGroupItems] = useState<BatchStatusItem[]>([]);
@@ -86,6 +131,24 @@ export default function PurchaseInvoiceTaskPage({ taskIdOverride, isGroup = fals
   const [agentTotalPages, setAgentTotalPages] = useState(1);
   const [stockPage, setStockPage] = useState(1);
   const [stockTotalPages, setStockTotalPages] = useState(1);
+  const autoCreateSnapshotRef = useRef<Record<number, { itemCode: string; itemGroup: string; accNo: string }>>({});
+  const autoCreateBaselineRef = useRef<Record<number, { itemCode: string; itemGroup: string; accNo: string }>>({});
+  const manualStockSnapshotRef = useRef<Record<number, { itemCode: string; itemGroup: string; accNo: string }>>({});
+  const itemCodeManuallyEditedRef = useRef<Record<number, boolean>>({});
+  const [draftStockGroupOptions, setDraftStockGroupOptions] = useState<DraftStockGroupOption[]>([]);
+  const [draftTaxCodeOptions, setDraftTaxCodeOptions] = useState<DraftTaxCodeOption[]>([]);
+  const [draftPickersLoading, setDraftPickersLoading] = useState(false);
+  const [stockGroupDialogSearch, setStockGroupDialogSearch] = useState('');
+  const [isStockGroupPickerOpen, setIsStockGroupPickerOpen] = useState(false);
+  const [stockGroupSearch, setStockGroupSearch] = useState('');
+  const [isTaxCodePickerOpen, setIsTaxCodePickerOpen] = useState(false);
+  const [taxCodeSearch, setTaxCodeSearch] = useState('');
+
+  // Keep late-arriving parent override in sync (common on group/item route).
+  useEffect(() => {
+    if (!earlyImageUrlOverride) return;
+    setEarlyImageUrl((current) => current || earlyImageUrlOverride);
+  }, [earlyImageUrlOverride]);
 
   useEffect(() => {
     if (!taskId) return;
@@ -123,11 +186,12 @@ export default function PurchaseInvoiceTaskPage({ taskIdOverride, isGroup = fals
           const previewMatches: PurchaseInvoicePreviewMatches = res.matches || {};
           setMatches(previewMatches);
 
-          // Auto-enable createMissing toggles based on empty codes
+          // Auto-enable autocreate whenever the backend proposes a new item.
+          // This keeps `isAutoCreate` aligned with the server-side proposal.
           const p = res.payload as PurchaseInvoicePreviewPayload;
           const itemToggles: Record<number, boolean> = {};
           p.details.forEach((d: PurchaseInvoicePreviewDetail, i: number) => {
-            if (!d.itemCode && previewMatches.items?.[i]?.proposedNewItem) {
+            if (previewMatches.items?.[i]?.proposedNewItem) {
               itemToggles[i] = true;
             }
           });
@@ -147,6 +211,18 @@ export default function PurchaseInvoiceTaskPage({ taskIdOverride, isGroup = fals
               uom: String(proposed.purchaseUom || proposed.baseUom || d.uom || 'UNIT'),
             } satisfies PurchaseInvoicePreviewDetail;
           });
+          autoCreateBaselineRef.current = nextDetails.reduce<Record<number, { itemCode: string; itemGroup: string; accNo: string }>>((acc, detail, index) => {
+            if (!itemToggles[index]) return acc;
+            acc[index] = {
+              itemCode: detail.itemCode,
+              itemGroup: detail.itemGroup,
+              accNo: detail.accNo,
+            };
+            return acc;
+          }, {});
+          autoCreateSnapshotRef.current = Object.fromEntries(
+            Object.entries(autoCreateSnapshotRef.current).filter(([key]) => itemToggles[Number(key)] !== false)
+          ) as Record<number, { itemCode: string; itemGroup: string; accNo: string }>;
           setPayload({ ...p, details: nextDetails });
 
           setLoading(false);
@@ -168,8 +244,111 @@ export default function PurchaseInvoiceTaskPage({ taskIdOverride, isGroup = fals
     return () => { isMounted = false; controller.abort(); };
   }, [router, taskId, loadNonce, accessToken]);
 
+  // Backend may mark task succeeded before image rendering is available.
+  // Retry a few times in background so users don't need manual refresh.
+  useEffect(() => {
+    if (!taskId || !accessToken) return;
+    if (taskStatus !== 'succeeded') return;
+    if (earlyImageUrl) return;
+
+    let cancelled = false;
+    const controller = new AbortController();
+
+    const run = async () => {
+      for (let attempt = 0; attempt < 10; attempt += 1) {
+        if (cancelled) return;
+
+        try {
+          const refreshed = await getPurchaseInvoicePreviewTask(taskId, {
+            accessToken,
+            signal: controller.signal,
+          });
+
+          if (cancelled) return;
+
+          if (refreshed.externalLink) {
+            setEarlyExternalLink((prev) => prev || refreshed.externalLink || null);
+            setEarlyDownloadUrl((prev) => prev || refreshed.externalLink || null);
+          }
+
+          if (refreshed.imageUrl) {
+            setEarlyImageUrl(refreshed.imageUrl);
+            return;
+          }
+        } catch {
+          // Ignore transient errors and keep retrying briefly.
+        }
+
+        await new Promise((resolve) => window.setTimeout(resolve, 1500));
+      }
+    };
+
+    void run();
+
+    return () => {
+      cancelled = true;
+      controller.abort();
+    };
+  }, [taskId, accessToken, taskStatus, earlyImageUrl]);
+
   const retryLoad = () => {
     setLoadNonce((current) => current + 1);
+  };
+
+  const handleRefreshOriginal = async () => {
+    if (!accessToken) {
+      toast.error('Your session is not ready yet.');
+      return;
+    }
+
+    setIsRefreshingOriginal(true);
+    try {
+      let resolvedTaskId = taskId;
+
+      if (groupItemIdOverride) {
+        const itemRes = await authFetch(`/api/purchase-invoice/batch/item?itemId=${encodeURIComponent(groupItemIdOverride)}`, {
+          cache: 'no-store',
+        });
+        if (itemRes.ok) {
+          const itemData = await itemRes.json() as {
+            item?: { groupId?: string; taskId?: string };
+            task?: { fileServer?: { imageUrl?: string } };
+          };
+          if (itemData.item?.taskId) {
+            resolvedTaskId = itemData.item.taskId;
+          }
+          if (itemData.task?.fileServer?.imageUrl) {
+            setEarlyImageUrl(itemData.task.fileServer.imageUrl);
+          }
+          onGroupItemResolved?.({
+            groupId: itemData.item?.groupId,
+            taskId: itemData.item?.taskId,
+            imageUrl: itemData.task?.fileServer?.imageUrl,
+          });
+        }
+      }
+
+      if (!resolvedTaskId) {
+        throw new Error('Preview task is not ready yet.');
+      }
+
+      const refreshed = await getPurchaseInvoicePreviewTask(resolvedTaskId, {
+        accessToken,
+      });
+      if (refreshed.externalLink) {
+        setEarlyExternalLink(refreshed.externalLink);
+        setEarlyDownloadUrl(refreshed.externalLink);
+      }
+      if (refreshed.imageUrl) {
+        setEarlyImageUrl(refreshed.imageUrl);
+      }
+      toast.success(refreshed.imageUrl ? 'Preview refreshed.' : 'Preview checked. Image is still not ready yet.');
+    } catch (error) {
+      const message = error instanceof Error && error.message ? error.message : 'Unable to refresh the original preview.';
+      toast.error(message);
+    } finally {
+      setIsRefreshingOriginal(false);
+    }
   };
 
   // Duplicate invoice check removed — not needed at this stage.
@@ -201,6 +380,11 @@ export default function PurchaseInvoiceTaskPage({ taskIdOverride, isGroup = fals
     }
   };
 
+  const activeEditingDetail = editingItemIndex !== null ? payload?.details?.[editingItemIndex] ?? null : null;
+  const activeAutoCreate = editingItemIndex !== null
+    ? !!(manualAutoCreateEnabled[editingItemIndex] || (createItemsEnabled[editingItemIndex] && matches.items?.[editingItemIndex]?.proposedNewItem))
+    : false;
+
   // Fetch group items for the stats modal when opened on a batch item page.
   // Uses SSE for real-time updates with a polling fallback.
   useEffect(() => {
@@ -211,14 +395,30 @@ export default function PurchaseInvoiceTaskPage({ taskIdOverride, isGroup = fals
 
     const TERMINAL = new Set<BatchStatusItem['phase']>(['succeeded', 'failed', 'canceled', 'cancelled', 'submitted', 'submit_failed', 'not_ready']);
 
-    const mapPhase = (s: string): BatchStatusItem['phase'] => {
+    const mapPhase = (s: string): BatchStatusItem['phase'] | null => {
       switch (s) {
-        case 'queued': case 'processing': case 'fileserver_uploading': return 'queued';
-        case 'ocrprocessing': return 'ocr_processing';
+        case 'queued':
+        case 'uploaded':
+        case 'processing':
+        case 'fileserver_uploading':
+          return 'queued';
+        case 'ocr_started':
+        case 'ocr_completed':
+        case 'ocrprocessing':
+          return 'ocr_processing';
         case 'reanalyze_queued': case 'reanalyzing': return 'ocr_processing';
-        case 'aianalyzing': return 'analyzing';
-        case 'completed': case 'completed_with_warnings': return 'succeeded';
-        case 'failed': return 'failed';
+        case 'draft_ready':
+        case 'analyzing':
+        case 'aianalyzing':
+          return 'analyzing';
+        case 'completed':
+        case 'completed_with_warnings':
+        case 'succeeded':
+        case 'success':
+          return 'succeeded';
+        case 'failed':
+        case 'error':
+          return 'failed';
         case 'canceled': return 'canceled';
         case 'cancelled': return 'cancelled';
         case 'submit_queued': return 'submit_queued';
@@ -227,7 +427,7 @@ export default function PurchaseInvoiceTaskPage({ taskIdOverride, isGroup = fals
         case 'submitted': return 'submitted';
         case 'submit_failed': return 'submit_failed';
         case 'not_ready': return 'not_ready';
-        default: return 'queued';
+        default: return null;
       }
     };
     const parseMs = (v?: string | null) => { if (!v) return null; const ms = Date.parse(v); return isNaN(ms) ? null : ms; };
@@ -259,19 +459,23 @@ export default function PurchaseInvoiceTaskPage({ taskIdOverride, isGroup = fals
       for (const it of data.items ?? []) {
         const id = it.itemId ?? it.taskId ?? '';
         if (!id) continue;
-        const phase = mapPhase(it.status ?? '');
-        const analysisPhase = it.analysisStatus ? mapPhase(it.analysisStatus) : (phase === 'succeeded' ? 'succeeded' : undefined);
+        const previous = itemMap.get(id);
+        const phase = mapPhase(it.status ?? '') ?? previous?.phase ?? 'queued';
+        const analysisPhase = it.analysisStatus
+          ? (mapPhase(it.analysisStatus) ?? previous?.analysisPhase ?? undefined)
+          : (phase === 'succeeded' ? 'succeeded' : previous?.analysisPhase);
         itemMap.set(id, {
+          ...(previous ?? {}),
           id,
-          fileName: it.fileName ?? id,
-          fileSize: 0,
+          fileName: it.fileName ?? previous?.fileName ?? id,
+          fileSize: previous?.fileSize ?? 0,
           phase,
           analysisPhase,
-          previewTaskId: it.taskId ?? it.itemId ?? null,
-          startedAt: parseMs(it.startedAt),
-          completedAt: parseMs(it.completedAt),
+          previewTaskId: it.taskId ?? it.itemId ?? previous?.previewTaskId ?? null,
+          startedAt: parseMs(it.startedAt) ?? previous?.startedAt ?? null,
+          completedAt: parseMs(it.completedAt) ?? previous?.completedAt ?? null,
           error: null,
-          warningCount: 0,
+          warningCount: previous?.warningCount ?? 0,
         });
       }
       if (itemMap.size > 0) { setGroupItems([...itemMap.values()]); setGroupNow(Date.now()); }
@@ -288,7 +492,7 @@ export default function PurchaseInvoiceTaskPage({ taskIdOverride, isGroup = fals
           startedAt: null, completedAt: null, error: null, warningCount: 0,
           phase: 'queued' as BatchStatusItem['phase'],
         };
-        const newPhase = mapPhase(ev.status ?? '');
+        const newPhase = ev.status ? (mapPhase(ev.status) ?? existing.phase) : existing.phase;
         itemMap.set(ev.itemId, {
           ...existing,
           phase: newPhase,
@@ -310,11 +514,11 @@ export default function PurchaseInvoiceTaskPage({ taskIdOverride, isGroup = fals
           ev.eventType === 'item_submitted'       ? 'submitted' :
           ev.eventType === 'item_submit_failed'   ? 'submit_failed' :
           ev.eventType === 'item_submit_skipped'  ? 'not_ready' : null;
-        const newPhase: BatchStatusItem['phase'] =
-          (phaseFromStatus && phaseFromStatus !== 'queued') ? phaseFromStatus :
-          phaseFromEvent ?? mapPhase(ev.status ?? '');
         const existing = itemMap.get(ev.itemId);
         if (existing) {
+          const newPhase: BatchStatusItem['phase'] =
+            (phaseFromStatus && phaseFromStatus !== 'queued') ? phaseFromStatus :
+            phaseFromEvent ?? (ev.status ? (mapPhase(ev.status) ?? existing.phase) : existing.phase);
           itemMap.set(ev.itemId, { ...existing, phase: newPhase });
           setGroupItems([...itemMap.values()]); setGroupNow(Date.now());
         }
@@ -523,6 +727,38 @@ export default function PurchaseInvoiceTaskPage({ taskIdOverride, isGroup = fals
     return () => clearTimeout(timer);
   }, [activeStockIdx, stockSearch]);
 
+  useEffect(() => {
+    if (editingItemIndex === null) {
+      return;
+    }
+
+    let isMounted = true;
+    const loadDraftPickers = async () => {
+      if (draftStockGroupOptions.length > 0 && draftTaxCodeOptions.length > 0) {
+        return;
+      }
+      setDraftPickersLoading(true);
+      try {
+        const [groups, taxCodes] = await Promise.all([
+          draftStockGroupOptions.length > 0 ? Promise.resolve(draftStockGroupOptions) : getDraftStockGroupOptions(accessToken ?? undefined),
+          draftTaxCodeOptions.length > 0 ? Promise.resolve(draftTaxCodeOptions) : getDraftTaxCodeOptions(accessToken ?? undefined),
+        ]);
+        if (!isMounted) return;
+        setDraftStockGroupOptions(groups);
+        setDraftTaxCodeOptions(taxCodes);
+      } catch (error) {
+        console.error('Draft picker options error:', error);
+      } finally {
+        if (isMounted) setDraftPickersLoading(false);
+      }
+    };
+
+    void loadDraftPickers();
+    return () => {
+      isMounted = false;
+    };
+  }, [accessToken, draftStockGroupOptions.length, draftTaxCodeOptions.length, editingItemIndex]);
+
   const loadMoreCreditors = async () => {
     if (!isCreditorOpen) return;
     if (isCreditorLoading || isCreditorLoadingMore) return;
@@ -587,6 +823,8 @@ export default function PurchaseInvoiceTaskPage({ taskIdOverride, isGroup = fals
     code: string;
     message?: string;
     line?: number;
+    field?: string;
+    severity?: string;
   };
 
   const isWarningObject = (value: unknown): value is WarningObject => {
@@ -631,13 +869,15 @@ export default function PurchaseInvoiceTaskPage({ taskIdOverride, isGroup = fals
   const FieldWarning = ({ code, line, customMsg }: { code: string, line?: number, customMsg?: string }) => {
     const warning = checkWarning(code, line);
     if (!warning) return null;
-    const msg =
-      customMsg ??
-      (isWarningObject(warning)
-        ? warning.message ?? warning.code
-        : typeof warning === 'string'
-          ? warning
-          : 'Warning');
+    const backendMessage = isWarningObject(warning) ? warning.message : undefined;
+    const backendField = isWarningObject(warning) ? warning.field : undefined;
+    const fallbackMessage = isWarningObject(warning)
+      ? warning.code
+      : typeof warning === 'string'
+        ? warning
+        : 'Warning';
+    const msg = backendMessage || customMsg || fallbackMessage;
+    const detailSuffix = backendField ? ` (${backendField})` : '';
     return (
       <Tooltip>
         <TooltipTrigger asChild>
@@ -650,7 +890,7 @@ export default function PurchaseInvoiceTaskPage({ taskIdOverride, isGroup = fals
           </Badge>
         </TooltipTrigger>
         <TooltipContent className="bg-zinc-900 border-zinc-800 text-white p-2 text-xs shadow-xl">
-          <p className="font-medium">{msg}</p>
+          <p className="font-medium">{msg}{detailSuffix}</p>
         </TooltipContent>
       </Tooltip>
     );
@@ -695,7 +935,11 @@ export default function PurchaseInvoiceTaskPage({ taskIdOverride, isGroup = fals
       return { ...prev, details: newDetails };
     });
 
-    if (field === 'itemCode' || field === 'description') {
+    if (field === 'itemCode') {
+      itemCodeManuallyEditedRef.current[index] = true;
+      removeWarning(['item_needs_review', 'item_not_matched'], index + 1);
+    }
+    if (field === 'description') {
        removeWarning(['item_needs_review', 'item_not_matched'], index + 1);
     }
     if (field === 'taxCode') {
@@ -712,16 +956,26 @@ export default function PurchaseInvoiceTaskPage({ taskIdOverride, isGroup = fals
       if (!current) return prev;
 
       if (!enabled) {
+        autoCreateSnapshotRef.current[lineIndex] = {
+          itemCode: current.itemCode || autoCreateBaselineRef.current[lineIndex]?.itemCode || '',
+          itemGroup: current.itemGroup || autoCreateBaselineRef.current[lineIndex]?.itemGroup || '',
+          accNo: current.accNo || autoCreateBaselineRef.current[lineIndex]?.accNo || '',
+        };
         // Switching off "Create": allow selecting an existing stock item again.
         newDetails[lineIndex] = {
           ...current,
           itemCode: '',
+          itemGroup: '',
+          accNo: '',
         };
         return { ...prev, details: newDetails };
       }
 
-      const suggestedCode = String(proposed.itemCodeSuggestion || '').trim();
-      const suggestedGroup = String(proposed.itemGroup || current.itemGroup || '').trim();
+      const cached = autoCreateSnapshotRef.current[lineIndex];
+      const baseline = autoCreateBaselineRef.current[lineIndex];
+      const suggestedCode = String(cached?.itemCode || proposed.itemCodeSuggestion || '').trim();
+      const suggestedGroup = String(cached?.itemGroup || baseline?.itemGroup || proposed.itemGroup || current.itemGroup || '').trim();
+      const suggestedAccNo = String(cached?.accNo || baseline?.accNo || current.accNo || '').trim();
       const suggestedDesc = String(proposed.description || current.description || '').trim();
       const suggestedDesc2 = String(proposed.desc2 || current.desc2 || '').trim();
       const suggestedUom = String(proposed.purchaseUom || proposed.baseUom || current.uom || 'UNIT').trim();
@@ -731,6 +985,7 @@ export default function PurchaseInvoiceTaskPage({ taskIdOverride, isGroup = fals
         // Fill into the row so the user can see/edit it inline.
         itemCode: suggestedCode,
         itemGroup: suggestedGroup,
+        accNo: suggestedAccNo,
         description: suggestedDesc,
         desc2: suggestedDesc2,
         uom: suggestedUom,
@@ -740,31 +995,77 @@ export default function PurchaseInvoiceTaskPage({ taskIdOverride, isGroup = fals
     });
   };
 
-  const addItem = () => {
+  const applyDraftStockGroupToLine = (lineIndex: number, value: string) => {
+    const selected = draftStockGroupOptions.find((option) => {
+      const optionValue = String(option.itemGroup || option.shortCode || '').trim();
+      return optionValue === value;
+    });
+
+    const nextItemGroup = String(selected?.itemGroup || selected?.shortCode || value || '').trim();
+    const nextAccNo = String(selected?.purchaseCode || '').trim();
+
+    // Apply itemGroup + accNo immediately from list data
     setPayload((prev) => {
       if (!prev) return prev;
-      return {
-        ...prev,
-        details: [
-          ...prev.details,
-          {
-            itemCode: '',
-            description: '',
-            desc2: '',
-            qty: 1,
-            unitPrice: 0,
-            amount: 0,
-            uom: 'UNIT',
-            taxCode: '',
-            accNo: '',
-            itemGroup: ''
-          }
-        ]
+      const newDetails = [...prev.details];
+      const current = newDetails[lineIndex];
+      if (!current) return prev;
+      newDetails[lineIndex] = { ...current, itemGroup: nextItemGroup, accNo: nextAccNo };
+      return { ...prev, details: newDetails };
+    });
+
+    // Fetch detail to get server-generated unique ItemCode, apply if user hasn't manually edited
+    void getDraftStockGroupDetail(value, accessToken ?? undefined).then((detail) => {
+      const generatedItemCode = String(detail?.generatedItemCode || '').trim();
+      if (!generatedItemCode) return;
+      setPayload((prev) => {
+        if (!prev) return prev;
+        const newDetails = [...prev.details];
+        const current = newDetails[lineIndex];
+        if (!current) return prev;
+        // Only apply if user hasn't manually typed their own itemCode
+        if (itemCodeManuallyEditedRef.current[lineIndex]) return prev;
+        newDetails[lineIndex] = { ...current, itemCode: generatedItemCode };
+        return { ...prev, details: newDetails };
+      });
+    });
+  };
+
+  const applyDraftTaxCodeToLine = (lineIndex: number, value: string) => {
+    setPayload((prev) => {
+      if (!prev) return prev;
+      const newDetails = [...prev.details];
+      const current = newDetails[lineIndex];
+      if (!current) return prev;
+
+      newDetails[lineIndex] = {
+        ...current,
+        taxCode: value,
       };
+
+      return { ...prev, details: newDetails };
     });
   };
 
   const removeItem = (index: number) => {
+    const shiftRecord = <T,>(source: Record<number, T>): Record<number, T> => {
+      const next: Record<number, T> = {};
+      for (const [key, value] of Object.entries(source)) {
+        const keyIndex = Number(key);
+        if (Number.isNaN(keyIndex)) continue;
+        if (keyIndex < index) next[keyIndex] = value;
+        if (keyIndex > index) next[keyIndex - 1] = value;
+      }
+      return next;
+    };
+
+    autoCreateSnapshotRef.current = shiftRecord(autoCreateSnapshotRef.current);
+    autoCreateBaselineRef.current = shiftRecord(autoCreateBaselineRef.current);
+    manualStockSnapshotRef.current = shiftRecord(manualStockSnapshotRef.current);
+    itemCodeManuallyEditedRef.current = shiftRecord(itemCodeManuallyEditedRef.current);
+    setCreateItemsEnabled((prev) => shiftRecord(prev));
+    setManualAutoCreateEnabled((prev) => shiftRecord(prev));
+    setManuallyAddedRows((prev) => shiftRecord(prev));
     setPayload((prev) => {
       if (!prev) return prev;
       const newDetails = [...prev.details];
@@ -773,40 +1074,79 @@ export default function PurchaseInvoiceTaskPage({ taskIdOverride, isGroup = fals
     });
   };
 
+  const isBackendAutoCreateRow = (index: number) => !!(createItemsEnabled[index] && matches.items?.[index]?.proposedNewItem);
+  const isManualAutoCreateRow = (index: number) => !!manualAutoCreateEnabled[index];
+  const isAutoCreateRow = (index: number) => isBackendAutoCreateRow(index) || isManualAutoCreateRow(index);
+
+  const createBlankDetail = (): PurchaseInvoicePreviewDetail => ({
+    itemCode: '',
+    description: '',
+    desc2: '',
+    qty: 1,
+    unitPrice: 0,
+    amount: 0,
+    uom: 'UNIT',
+    taxCode: '',
+    accNo: '',
+    itemGroup: '',
+  });
+
+  const appendNewItem = (): number | null => {
+    if (!payload) return null;
+    const nextIndex = payload.details.length;
+    setPayload((prev) => {
+      if (!prev) return prev;
+      return {
+        ...prev,
+        details: [...prev.details, createBlankDetail()],
+      };
+    });
+    setManuallyAddedRows((prev) => ({ ...prev, [nextIndex]: true }));
+    return nextIndex;
+  };
+
+  const startNewStockItem = () => {
+    const nextIndex = appendNewItem();
+    if (nextIndex === null) return;
+    setActiveStockIdx(nextIndex);
+  };
+
   const buildSubmitRequest = (): PurchaseInvoiceSubmitRequest | null => {
     if (!payload || !taskId) return null;
 
     const details = payload.details.map((d: any, i: number) => {
-      const isAutoCreate = !!(createItemsEnabled[i] && matches.items?.[i]?.proposedNewItem);
-      const proposed = isAutoCreate ? ((matches.items?.[i]?.proposedNewItem || {}) as PreviewProposedNewItem) : null;
+      const proposed = matches.items?.[i]?.proposedNewItem ? ((matches.items?.[i]?.proposedNewItem || {}) as PreviewProposedNewItem) : null;
+      const isAutoCreate = isAutoCreateRow(i);
+      const qty = Number(d.qty);
+      const unitPrice = Number(d.unitPrice);
+      const amount = Number(d.amount);
+      const autoCreateStock = isAutoCreate ? {
+        ItemCode: d.itemCode || proposed?.itemCodeSuggestion || '',
+        Description: d.description || proposed?.description || '',
+        ItemGroup: d.itemGroup || proposed?.itemGroup || '',
+        SalesUOM: proposed?.salesUom || 'UNIT',
+        PurchaseUOM: proposed?.purchaseUom || 'UNIT',
+        ReportUOM: proposed?.reportUom || 'UNIT',
+        BaseUOM: proposed?.baseUom || 'UNIT',
+        TaxCode: d.taxCode || proposed?.taxCode || null,
+        PurchaseTaxCode: d.taxCode || proposed?.purchaseTaxCode || proposed?.taxCode || null,
+        IsActive: true,
+        StockControl: true,
+      } : null;
       return {
         lineNo: i + 1,
         itemCode: d.itemCode || '',
         accNo: d.accNo || '',
-        qty: d.qty,
+        qty,
         uom: d.uom || '',
-        unitPrice: d.unitPrice,
-        amount: d.amount,
+        unitPrice,
+        amount,
         description: d.description || '',
         desc2: d.desc2 || '',
         taxCode: d.taxCode || '',
         itemGroup: d.itemGroup || '',
         isAutoCreate,
-        ...(isAutoCreate && proposed ? {
-          autoCreateStock: {
-            ItemCode: d.itemCode || proposed.itemCodeSuggestion || '',
-            Description: d.description || proposed.description || '',
-            ItemGroup: d.itemGroup || proposed.itemGroup || '',
-            SalesUOM: proposed.salesUom || 'UNIT',
-            PurchaseUOM: proposed.purchaseUom || 'UNIT',
-            ReportUOM: proposed.reportUom || 'UNIT',
-            BaseUOM: proposed.baseUom || 'UNIT',
-            TaxCode: proposed.taxCode ?? null,
-            PurchaseTaxCode: proposed.purchaseTaxCode ?? null,
-            IsActive: proposed.active ?? true,
-            StockControl: proposed.stockControl ?? true,
-          },
-        } : {}),
+        ...(autoCreateStock ? { autoCreateStock } : {}),
       };
     });
 
@@ -823,7 +1163,7 @@ export default function PurchaseInvoiceTaskPage({ taskIdOverride, isGroup = fals
         docDate: payload.docDate,
         displayTerm: payload.displayTerm,
         currencyCode: payload.currencyCode,
-        currencyRate: payload.currencyRate,
+        currencyRate: Number(payload.currencyRate) > 0 ? Number(payload.currencyRate) : 1,
         description: payload.description || 'PURCHASE INVOICE',
         externalLink: earlyExternalLink || payload.externalLink || '',
         invAddr1,
@@ -835,13 +1175,64 @@ export default function PurchaseInvoiceTaskPage({ taskIdOverride, isGroup = fals
     };
   };
 
+  const validateBeforeSubmit = (): string | null => {
+    if (!payload) return null;
+    const details = payload.details ?? [];
+    if (!accessToken?.trim()) {
+      return 'Session expired. Please sign in again before submitting.';
+    }
+    if (details.length === 0) {
+      return 'At least one item is required before submit.';
+    }
+    const missingExternalLink = !(earlyExternalLink || payload.externalLink || '').trim();
+    if (missingExternalLink) {
+      return 'Original document link is missing. Please reupload or refresh the task.';
+    }
+    const invalidLines = details.flatMap((detail, index) => {
+      const problems: string[] = [];
+      if (!String(detail.itemCode || '').trim()) problems.push('itemCode');
+      if (!String(detail.uom || '').trim()) problems.push('uom');
+      if (!String(detail.accNo || '').trim()) problems.push('accNo');
+      const qty = Number(detail.qty);
+      if (!Number.isFinite(qty) || qty <= 0) problems.push('qty');
+      const unitPrice = Number(detail.unitPrice);
+      if (!Number.isFinite(unitPrice) || unitPrice < 0) problems.push('unitPrice');
+      return problems.length > 0 ? [`line ${index + 1}: ${problems.join(', ')}`] : [];
+    });
+    if (invalidLines.length > 0) {
+      return `Submit validation failed: ${invalidLines.join(' ; ')}`;
+    }
+    const missingAutoCreateLines = details.flatMap((detail, index) => {
+      if (!isAutoCreateRow(index)) return [];
+      return String(detail.itemCode || '').trim() && String(detail.description || '').trim() ? [] : [index + 1];
+    });
+
+    if (missingAutoCreateLines.length > 0) {
+      return `Lines ${missingAutoCreateLines.join(', ')} need ItemCode and Description before submit.`;
+    }
+
+    return null;
+  };
+
   const handleSubmit = async () => {
+    const validationError = validateBeforeSubmit();
+    if (validationError) {
+      toast.error(validationError);
+      return;
+    }
+
     const req = buildSubmitRequest();
     if (!req) return;
     await startSubmit(req);
   };
 
   const handleSubmitSilent = async () => {
+    const validationError = validateBeforeSubmit();
+    if (validationError) {
+      toast.error(validationError);
+      return;
+    }
+
     const req = buildSubmitRequest();
     if (!req) return;
     await startSubmit(req, { silent: true });
@@ -856,9 +1247,12 @@ export default function PurchaseInvoiceTaskPage({ taskIdOverride, isGroup = fals
   };
 
   const downloadOriginalHref = safeExternalHref(earlyDownloadUrl || earlyExternalLink || payload?.externalLink || null);
+  const proxiedDownloadOriginalHref = buildAssetProxyUrl(earlyDownloadUrl || earlyExternalLink || payload?.externalLink || null);
+  const previewImageSrc = buildAssetProxyUrl(earlyImageUrl);
+  const previewDocumentSrc = buildAssetProxyUrl(earlyExternalLink || payload?.externalLink || null);
 
   const statusLabel =
-    submitStatus === 'completed'
+    submitStatus === 'completed' || submitStatus === 'submitted'
       ? 'Submitted'
       : taskStatus === 'queued'
         ? 'Queued'
@@ -899,7 +1293,7 @@ export default function PurchaseInvoiceTaskPage({ taskIdOverride, isGroup = fals
                   <Download className="h-4 w-4" />
                   Download Original
                 </a>
-                {submitStatus !== 'completed' && (
+                {submitStatus !== 'completed' && submitStatus !== 'submitted' && (
                   <button
                     type="button"
                     onClick={handleReanalyze}
@@ -971,8 +1365,9 @@ export default function PurchaseInvoiceTaskPage({ taskIdOverride, isGroup = fals
     );
   }
 
-  const subtotal = payload.details.reduce((acc, item) => acc + (Number(item.qty) * Number(item.unitPrice)), 0);
-  const taxAmount = payload.details.reduce((acc, item) => {
+  const draftDetails = payload?.details ?? [];
+  const subtotal = draftDetails.reduce((acc, item) => acc + (Number(item.qty) * Number(item.unitPrice)), 0);
+  const taxAmount = draftDetails.reduce((acc, item) => {
     // Basic mock: 11% tax for items that have a taxCode present
     if (item.taxCode) {
       return acc + (Number(item.amount) * 0.11);
@@ -989,7 +1384,7 @@ export default function PurchaseInvoiceTaskPage({ taskIdOverride, isGroup = fals
         <div className="flex items-center gap-3">
           <h1 className="text-xl font-semibold tracking-tight text-zinc-950">Purchase invoice review draft</h1>
           {statusLabel ? (
-            <span className={`inline-flex items-center rounded-full border px-2.5 py-1 text-[11px] font-semibold ${submitStatus === 'completed' ? 'border-emerald-200 bg-emerald-50 text-emerald-700' : 'border-zinc-200 bg-zinc-50 text-zinc-600'}`}>
+            <span className={`inline-flex items-center rounded-full border px-2.5 py-1 text-[11px] font-semibold ${submitStatus === 'completed' || submitStatus === 'submitted' ? 'border-emerald-200 bg-emerald-50 text-emerald-700' : 'border-zinc-200 bg-zinc-50 text-zinc-600'}`}>
               {statusLabel}
             </span>
           ) : null}
@@ -1013,7 +1408,7 @@ export default function PurchaseInvoiceTaskPage({ taskIdOverride, isGroup = fals
                 <Download className="h-4 w-4" />
                 Download Original
               </a>
-              {submitStatus !== 'completed' && (
+              {submitStatus !== 'completed' && submitStatus !== 'submitted' && (
                 <button
                   type="button"
                   onClick={handleReanalyze}
@@ -1037,7 +1432,7 @@ export default function PurchaseInvoiceTaskPage({ taskIdOverride, isGroup = fals
               Stats
             </button>
           )}
-          {submitStatus !== 'completed' && (
+          {submitStatus !== 'completed' && submitStatus !== 'submitted' && (
             <button
               type="button"
               onClick={handleSubmit}
@@ -1304,11 +1699,13 @@ export default function PurchaseInvoiceTaskPage({ taskIdOverride, isGroup = fals
                 </div>
 
                 <div className="space-y-3">
-                  {payload.details.map((item, index) => (
+                  {draftDetails.map((item, index) => (
                     <div key={index} className={cn(
                       "flex flex-col gap-1 rounded-lg p-2 -mx-2 transition-all duration-200",
                       hasAnyWarningForLine(index + 1)
                         ? "border border-yellow-400 bg-yellow-50/30 ring-2 ring-yellow-400/10"
+                        : isAutoCreateRow(index)
+                        ? "border border-blue-300 bg-blue-50/20 ring-2 ring-blue-300/10"
                         : ""
                     )}>
                       <div className="flex flex-wrap gap-2 mb-1 items-center">
@@ -1342,43 +1739,90 @@ export default function PurchaseInvoiceTaskPage({ taskIdOverride, isGroup = fals
                             </Tooltip>
                           );
                         })()}
+                        {/* New item badge */}
+                        {isAutoCreateRow(index) && (
+                          <Badge
+                            variant="outline"
+                            className="bg-blue-50 text-blue-700 border-blue-200 uppercase tracking-wider text-[10px] py-0 px-1.5 h-5 flex items-center gap-1"
+                          >
+                            <Plus className="w-3 h-3 text-blue-500" />
+                            NEW ITEM
+                          </Badge>
+                        )}
                         {/* Auto-create item toggle */}
-                        {matches.items?.[index]?.proposedNewItem && (
-                          <button
-                            type="button"
-                            onClick={() =>
+                        {matches.items?.[index]?.proposedNewItem && (() => {
+                          const isBackend = !!matches.items?.[index]?.proposedNewItem;
+                          const toggleOn = isBackend ? !!createItemsEnabled[index] : !!manualAutoCreateEnabled[index];
+                          const handleToggle = () => {
+                            if (isBackend) {
                               setCreateItemsEnabled((prev) => {
                                 const nextEnabled = !prev[index];
                                 applyProposedNewItemToLine(index, nextEnabled);
                                 return { ...prev, [index]: nextEnabled };
-                              })
+                              });
+                            } else {
+                              const nextEnabled = !manualAutoCreateEnabled[index];
+                              setManualAutoCreateEnabled((prev) => ({ ...prev, [index]: nextEnabled }));
+                              setPayload((prev) => {
+                                if (!prev) return prev;
+                                const newDetails = [...prev.details];
+                                const current = newDetails[index];
+                                if (!current) return prev;
+                                if (nextEnabled) {
+                                  // Stock → AutoCreate: cache stock selection, clear for new code input
+                                  // Reset manual-edit flag so stock group changes auto-update the prefix
+                                  itemCodeManuallyEditedRef.current[index] = false;
+                                  manualStockSnapshotRef.current[index] = {
+                                    itemCode: current.itemCode || '',
+                                    itemGroup: current.itemGroup || '',
+                                    accNo: current.accNo || '',
+                                  };
+                                  newDetails[index] = { ...current, itemCode: '', itemGroup: '', accNo: '' };
+                                } else {
+                                  // AutoCreate → Stock: restore cached stock selection
+                                  const snap = manualStockSnapshotRef.current[index];
+                                  newDetails[index] = {
+                                    ...current,
+                                    itemCode: snap?.itemCode || '',
+                                    itemGroup: snap?.itemGroup || '',
+                                    accNo: snap?.accNo || '',
+                                  };
+                                }
+                                return { ...prev, details: newDetails };
+                              });
                             }
-                            className={cn(
-                              'inline-flex items-center gap-1.5 rounded-md border px-2 py-1 text-[10px] font-medium transition-all',
-                              createItemsEnabled[index]
-                                ? 'border-emerald-300 bg-emerald-50 text-emerald-700'
-                                : 'border-zinc-200 bg-zinc-50 text-zinc-500 hover:border-zinc-300'
-                            )}
-                          >
-                            <span
+                          };
+                          return (
+                            <button
+                              type="button"
+                              onClick={handleToggle}
                               className={cn(
-                                'relative inline-flex h-3 w-5 shrink-0 items-center rounded-full transition-colors',
-                                createItemsEnabled[index] ? 'bg-emerald-500' : 'bg-zinc-300'
+                                'inline-flex items-center gap-1.5 rounded-md border px-2 py-1 text-[10px] font-medium transition-all',
+                                toggleOn
+                                  ? 'border-emerald-300 bg-emerald-50 text-emerald-700'
+                                  : 'border-zinc-200 bg-zinc-50 text-zinc-500 hover:border-zinc-300'
                               )}
                             >
                               <span
                                 className={cn(
-                                  'inline-block h-2 w-2 rounded-full bg-white shadow-sm transition-transform',
-                                  createItemsEnabled[index] ? 'translate-x-2.5' : 'translate-x-0.5'
+                                  'relative inline-flex h-3 w-5 shrink-0 items-center rounded-full transition-colors',
+                                  toggleOn ? 'bg-emerald-500' : 'bg-zinc-300'
                                 )}
-                              />
-                            </span>
-                            AutoCreate
-                          </button>
-                        )}
+                              >
+                                <span
+                                  className={cn(
+                                    'inline-block h-2 w-2 rounded-full bg-white shadow-sm transition-transform',
+                                    toggleOn ? 'translate-x-2.5' : 'translate-x-0.5'
+                                  )}
+                                />
+                              </span>
+                              AutoCreate
+                            </button>
+                          );
+                        })()}
                       </div>
                       <div className="grid grid-cols-[1.5fr_1fr_60px_60px_1fr_1fr_60px] gap-3 items-center">
-                        {createItemsEnabled[index] && matches.items?.[index]?.proposedNewItem ? (
+                        {isAutoCreateRow(index) ? (
                           <input
                             type="text"
                             value={item.itemCode || ''}
@@ -1510,7 +1954,7 @@ export default function PurchaseInvoiceTaskPage({ taskIdOverride, isGroup = fals
 
                 <button
                   type="button"
-                  onClick={addItem}
+                  onClick={startNewStockItem}
                   className="mt-4 flex items-center gap-1.5 text-sm font-medium text-gray-700 hover:text-gray-900 transition-colors"
                 >
                   <Plus className="w-4 h-4" /> Add Item
@@ -1519,37 +1963,199 @@ export default function PurchaseInvoiceTaskPage({ taskIdOverride, isGroup = fals
             </div>
           </div>
 
-          <Dialog open={editingItemIndex !== null} onOpenChange={(open) => !open && setEditingItemIndex(null)}>
+          <Dialog open={editingItemIndex !== null} onOpenChange={(open) => { if (!open) { setEditingItemIndex(null); setIsStockGroupPickerOpen(false); setStockGroupSearch(''); setIsTaxCodePickerOpen(false); setTaxCodeSearch(''); } }}>
             <DialogContent className="sm:max-w-[450px] bg-white">
               <DialogHeader>
                 <DialogTitle>Extra Item Details</DialogTitle>
+                <DialogDescription className="sr-only">
+                  Review and edit details for the selected invoice item.
+                </DialogDescription>
               </DialogHeader>
-              {editingItemIndex !== null && payload.details[editingItemIndex] && (
+              {editingItemIndex !== null && activeEditingDetail && (
                 <div className="grid gap-4 py-4">
                   <div>
                     <label className="text-sm font-medium mb-1.5 block">Description</label>
-                    <div className="flex h-10 w-full items-center rounded-md border border-gray-200 bg-zinc-50 px-3 py-2 text-sm text-zinc-600">
-                      {payload.details[editingItemIndex].description || ''}
-                    </div>
+                    {activeAutoCreate ? (
+                      <input
+                        type="text"
+                        value={activeEditingDetail.description || ''}
+                        onChange={(e) => handleItemChange(editingItemIndex, 'description', e.target.value)}
+                        placeholder="Item description"
+                        className="flex h-10 w-full items-center rounded-md border border-gray-200 bg-white px-3 py-2 text-sm text-zinc-800 outline-none focus:border-zinc-400 transition-colors"
+                      />
+                    ) : (
+                      <div className="flex h-10 w-full items-center rounded-md border border-gray-200 bg-zinc-50 px-3 py-2 text-sm text-zinc-600">
+                        {activeEditingDetail.description || ''}
+                      </div>
+                    )}
                   </div>
                   <div>
                     <label className="text-sm font-medium mb-1.5 block">Description 2 (desc2)</label>
-                    <div className="flex h-10 w-full items-center rounded-md border border-gray-200 bg-zinc-50 px-3 py-2 text-sm text-zinc-600">
-                      {payload.details[editingItemIndex].desc2 || ''}
-                    </div>
+                    {activeAutoCreate ? (
+                      <input
+                        type="text"
+                        value={activeEditingDetail.desc2 || ''}
+                        onChange={(e) => handleItemChange(editingItemIndex, 'desc2', e.target.value)}
+                        placeholder="Secondary description"
+                        className="flex h-10 w-full items-center rounded-md border border-gray-200 bg-white px-3 py-2 text-sm text-zinc-800 outline-none focus:border-zinc-400 transition-colors"
+                      />
+                    ) : (
+                      <div className="flex h-10 w-full items-center rounded-md border border-gray-200 bg-zinc-50 px-3 py-2 text-sm text-zinc-600">
+                        {activeEditingDetail.desc2 || ''}
+                      </div>
+                    )}
                   </div>
-                  <div>
-                    <label className="text-sm font-medium mb-1.5 block">Tax Code</label>
-                    <div className="flex h-10 w-full items-center rounded-md border border-gray-200 bg-zinc-50 px-3 py-2 text-sm text-zinc-600">
-                      {payload.details[editingItemIndex].taxCode || ''}
-                    </div>
-                  </div>
-                  <div>
-                    <label className="text-sm font-medium mb-1.5 block">Item Group (Creation only)</label>
-                    <div className="flex h-10 w-full items-center rounded-md border border-gray-200 bg-zinc-50 px-3 py-2 text-sm text-zinc-600">
-                      {payload.details[editingItemIndex].itemGroup || ''}
-                    </div>
-                  </div>
+                  {activeAutoCreate ? (
+                    <>
+                      {/* Stock Group */}
+                      <div>
+                        <label className="text-sm font-medium mb-1.5 block">Stock Group</label>
+                        <div className="relative">
+                          <button
+                            type="button"
+                            onClick={() => { setIsStockGroupPickerOpen((v) => !v); setStockGroupSearch(''); }}
+                            className="w-full h-[38px] flex items-center justify-between border border-gray-200 rounded-md px-3 py-2 text-sm bg-white outline-none"
+                          >
+                            {activeEditingDetail.itemGroup ? (
+                              <span className="font-medium text-sm">{activeEditingDetail.itemGroup}</span>
+                            ) : (
+                              <span className="text-gray-400">Select stock group</span>
+                            )}
+                            <ChevronDown className="ml-2 h-4 w-4 shrink-0 opacity-50" />
+                          </button>
+                          {isStockGroupPickerOpen && (
+                            <div className="mt-1 w-full rounded-md border border-gray-200 bg-white shadow-lg overflow-hidden">
+                              <div className="border-b border-gray-100 px-3 py-2">
+                                <input
+                                  autoFocus
+                                  type="text"
+                                  placeholder="Search stock group..."
+                                  value={stockGroupSearch}
+                                  onChange={(e) => setStockGroupSearch(e.target.value)}
+                                  className="w-full text-sm outline-none bg-transparent placeholder:text-gray-400"
+                                />
+                              </div>
+                              <div className="max-h-48 overflow-y-auto">
+                                {draftPickersLoading && <div className="p-4 text-xs text-center text-gray-500">Loading...</div>}
+                                {(() => {
+                                  const q = stockGroupSearch.toLowerCase();
+                                  const filtered = draftStockGroupOptions.filter((opt) => {
+                                    if (!q) return true;
+                                    return [opt.itemGroup, opt.shortCode, opt.purchaseCode, opt.itemGroupDescription, opt.description]
+                                      .some((v) => String(v || '').toLowerCase().includes(q));
+                                  });
+                                  if (filtered.length === 0) return <div className="p-4 text-xs text-center text-gray-400">No results found.</div>;
+                                  return filtered.map((option) => {
+                                    const value = String(option.itemGroup || option.shortCode || '').trim();
+                                    if (!value) return null;
+                                    const label = String(option.itemGroupDescription || option.description || option.itemGroup || value).trim();
+                                    const meta = [option.shortCode, option.purchaseCode].map((v) => String(v || '').trim()).filter(Boolean).join(' · ');
+                                    return (
+                                      <button
+                                        key={value}
+                                        type="button"
+                                        onMouseDown={(e) => e.preventDefault()}
+                                        onClick={() => { applyDraftStockGroupToLine(editingItemIndex, value); setIsStockGroupPickerOpen(false); }}
+                                        className="w-full flex flex-col items-start px-3 py-2 text-left text-sm hover:bg-zinc-50 transition-colors"
+                                      >
+                                        <span className="font-medium text-zinc-800">{label}</span>
+                                        {meta && <span className="text-xs text-gray-400">{meta}</span>}
+                                      </button>
+                                    );
+                                  });
+                                })()}
+                              </div>
+                            </div>
+                          )}
+                        </div>
+                      </div>
+
+                      {/* Account Code — read-only */}
+                      <div>
+                        <label className="text-sm font-medium mb-1.5 block">Account Code</label>
+                        <div className="flex h-10 w-full items-center rounded-md border border-gray-200 bg-zinc-50 px-3 py-2 text-sm text-zinc-600">
+                          {activeEditingDetail.accNo || ''}
+                        </div>
+                      </div>
+
+                      {/* Tax Code */}
+                      <div>
+                        <label className="text-sm font-medium mb-1.5 block">Tax Code</label>
+                        <div className="relative">
+                          <button
+                            type="button"
+                            onClick={() => { setIsTaxCodePickerOpen((v) => !v); setTaxCodeSearch(''); }}
+                            className="w-full h-[38px] flex items-center justify-between border border-gray-200 rounded-md px-3 py-2 text-sm bg-white outline-none"
+                          >
+                            {activeEditingDetail.taxCode ? (
+                              <span className="font-medium text-sm">{activeEditingDetail.taxCode}</span>
+                            ) : (
+                              <span className="text-gray-400">Select tax code</span>
+                            )}
+                            <ChevronDown className="ml-2 h-4 w-4 shrink-0 opacity-50" />
+                          </button>
+                          {isTaxCodePickerOpen && (
+                            <div className="mt-1 w-full rounded-md border border-gray-200 bg-white shadow-lg overflow-hidden">
+                              <div className="border-b border-gray-100 px-3 py-2">
+                                <input
+                                  autoFocus
+                                  type="text"
+                                  placeholder="Search tax code..."
+                                  value={taxCodeSearch}
+                                  onChange={(e) => setTaxCodeSearch(e.target.value)}
+                                  className="w-full text-sm outline-none bg-transparent placeholder:text-gray-400"
+                                />
+                              </div>
+                              <div className="max-h-48 overflow-y-auto">
+                                {draftPickersLoading && <div className="p-4 text-xs text-center text-gray-500">Loading...</div>}
+                                {(() => {
+                                  const q = taxCodeSearch.toLowerCase();
+                                  const filtered = draftTaxCodeOptions.filter((opt) => {
+                                    if (!q) return true;
+                                    return [opt.taxCode, opt.description, opt.name]
+                                      .some((v) => String(v || '').toLowerCase().includes(q));
+                                  });
+                                  if (filtered.length === 0) return <div className="p-4 text-xs text-center text-gray-400">No results found.</div>;
+                                  return filtered.map((option) => {
+                                    const value = String(option.taxCode || '').trim();
+                                    if (!value) return null;
+                                    const label = String(option.description || option.name || '').trim();
+                                    return (
+                                      <button
+                                        key={value}
+                                        type="button"
+                                        onMouseDown={(e) => e.preventDefault()}
+                                        onClick={() => { applyDraftTaxCodeToLine(editingItemIndex, value); setIsTaxCodePickerOpen(false); }}
+                                        className="w-full flex flex-col items-start px-3 py-2 text-left text-sm hover:bg-zinc-50 transition-colors"
+                                      >
+                                        <span className="font-medium text-zinc-800">{value}</span>
+                                        {label && label !== value && <span className="text-xs text-gray-400">{label}</span>}
+                                      </button>
+                                    );
+                                  });
+                                })()}
+                              </div>
+                            </div>
+                          )}
+                        </div>
+                      </div>
+                    </>
+                  ) : (
+                    <>
+                      <div>
+                        <label className="text-sm font-medium mb-1.5 block">Tax Code</label>
+                        <div className="flex h-10 w-full items-center rounded-md border border-gray-200 bg-zinc-50 px-3 py-2 text-sm text-zinc-600">
+                          {activeEditingDetail.taxCode || ''}
+                        </div>
+                      </div>
+                      <div>
+                        <label className="text-sm font-medium mb-1.5 block">Item Group</label>
+                        <div className="flex h-10 w-full items-center rounded-md border border-gray-200 bg-zinc-50 px-3 py-2 text-sm text-zinc-600">
+                          {activeEditingDetail.itemGroup || ''}
+                        </div>
+                      </div>
+                    </>
+                  )}
                 </div>
               )}
               <DialogFooter>
@@ -1569,10 +2175,13 @@ export default function PurchaseInvoiceTaskPage({ taskIdOverride, isGroup = fals
             <DialogContent className="sm:max-w-[360px] bg-white">
               <DialogHeader>
                 <DialogTitle>Delete item?</DialogTitle>
+                <DialogDescription className="sr-only">
+                  Confirm removing this item from the invoice.
+                </DialogDescription>
               </DialogHeader>
               <p className="text-sm text-zinc-500">
-                {deletingItemIndex !== null && payload.details[deletingItemIndex]
-                  ? <>Remove <span className="font-medium text-zinc-900">{payload.details[deletingItemIndex].itemCode || 'this item'}</span> from the invoice?</>
+                {deletingItemIndex !== null && draftDetails[deletingItemIndex]
+                  ? <>Remove <span className="font-medium text-zinc-900">{draftDetails[deletingItemIndex].itemCode || 'this item'}</span> from the invoice?</>
                   : 'This action cannot be undone.'}
               </p>
               <DialogFooter className="gap-2">
@@ -1601,8 +2210,18 @@ export default function PurchaseInvoiceTaskPage({ taskIdOverride, isGroup = fals
           <div className="bg-[#f8f9fa] p-8 overflow-y-auto">
             <div className="flex items-center justify-between mb-8">
               <h2 className="text-lg font-medium">Preview</h2>
-              {(earlyImageUrl || earlyExternalLink) && (
-                <div className="flex items-center rounded-lg bg-zinc-100 p-1 gap-0.5">
+              <div className="flex items-center gap-3">
+                <button
+                  type="button"
+                  onClick={handleRefreshOriginal}
+                  disabled={isRefreshingOriginal}
+                  className="inline-flex items-center gap-2 rounded-lg border border-zinc-200 bg-white px-3 py-2 text-xs font-medium text-zinc-700 transition hover:bg-zinc-50 disabled:cursor-not-allowed disabled:opacity-50"
+                >
+                  {isRefreshingOriginal ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <RefreshCcw className="h-3.5 w-3.5" />}
+                  Refresh
+                </button>
+                {(earlyImageUrl || earlyExternalLink) && (
+                  <div className="flex items-center rounded-lg bg-zinc-100 p-1 gap-0.5">
                   <button
                     type="button"
                     onClick={() => setPreviewMode('form')}
@@ -1625,34 +2244,35 @@ export default function PurchaseInvoiceTaskPage({ taskIdOverride, isGroup = fals
                   >
                     Original
                   </button>
-                </div>
-              )}
+                  </div>
+                )}
+              </div>
             </div>
 
             {previewMode === 'original' && (earlyImageUrl || earlyExternalLink) ? (
               <div className="flex flex-col items-center gap-4">
-                {earlyImageUrl ? (
+                {previewImageSrc ? (
                   /* Rendered image preview (works for both images and PDFs) */
                   <div className="w-full max-w-2xl mx-auto rounded-xl overflow-hidden shadow-[0_2px_12px_rgba(0,0,0,0.08)] bg-white">
                     {/* eslint-disable-next-line @next/next/no-img-element */}
                     <img
-                      src={earlyImageUrl}
+                      src={previewImageSrc}
                       alt="Invoice original"
                       className="w-full h-auto block"
                     />
                   </div>
-                ) : earlyExternalLink ? (
+                ) : previewDocumentSrc ? (
                   /* PDF iframe fallback if no imageUrl */
                   <iframe
-                    src={earlyExternalLink}
+                    src={previewDocumentSrc}
                     className="w-full max-w-2xl mx-auto rounded-xl shadow-[0_2px_12px_rgba(0,0,0,0.08)] bg-white"
                     style={{ height: '80vh', border: 'none' }}
                     title="Invoice original"
                   />
                 ) : null}
-                {earlyExternalLink && (
+                {(proxiedDownloadOriginalHref || downloadOriginalHref) && (
                   <a
-                    href={earlyExternalLink}
+                    href={proxiedDownloadOriginalHref || downloadOriginalHref || '#'}
                     target="_blank"
                     rel="noopener noreferrer"
                     className="flex items-center gap-1.5 text-xs text-zinc-500 hover:text-zinc-800 transition-colors"
@@ -1722,7 +2342,7 @@ export default function PurchaseInvoiceTaskPage({ taskIdOverride, isGroup = fals
                     </tr>
                   </thead>
                   <tbody className="divide-y divide-gray-50">
-                    {payload.details.map((item, index) => (
+                    {draftDetails.map((item, index) => (
                       <tr key={index}>
                         <td className="py-4 font-medium">{item.itemCode || ''}</td>
                         <td className="py-4 text-gray-600">{item.accNo || ''}</td>

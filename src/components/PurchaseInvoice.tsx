@@ -4,7 +4,7 @@ import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import {
   FileText,
   ChevronRight,
-  Pencil,
+  Eye,
   Trash2,
   Hash,
   Building2,
@@ -35,6 +35,7 @@ import { Popover, PopoverContent, PopoverTrigger } from '@/components/ui/popover
 import { Slider } from '@/components/ui/slider';
 import { UploadInvoiceModal, type BatchCreatedPayload } from './UploadInvoiceModal';
 import DeleteConfirmModal from './DeleteConfirmModal';
+import InvoiceDetailModal from './InvoiceDetailModal';
 import { batchStore } from '../lib/batch-store';
 import { authFetch } from '../lib/auth-fetch';
 import { BatchStatusModal, type BatchStatusItem, type BatchItemPhase } from './BatchStatusModal';
@@ -49,9 +50,21 @@ import type {
 } from '../lib/purchase-invoice-api';
 import { getPurchaseInvoiceList } from '../lib/purchase-invoice-api';
 
+type HistoryItem = {
+  type: 'group' | 'task';
+  id: string;
+  bookId: string;
+  groupId: string;
+  taskId: string;
+  status: string;
+  createdAt: string;
+  updatedAt: string;
+};
+
 interface EditableInvoice {
   id: string; // This will be the supplierInvoiceNo (DocKey)
   rowKey: string;
+  docKey: string;
   supplierInvoiceNo: string;
   creditorName: string;
   purchaseAgent: string;
@@ -127,6 +140,7 @@ function mapToEditableInvoice(item: PurchaseInvoiceListItem): EditableInvoice {
   return {
     id: item.supplierInvoiceNo,
     rowKey: item.supplierInvoiceNo,
+    docKey: item.docKey,
     supplierInvoiceNo: item.supplierInvoiceNo,
     creditorName: item.supplier,
     purchaseAgent: item.agent,
@@ -203,14 +217,30 @@ export function PurchaseInvoice() {
     return () => window.clearInterval(t);
   }, [batchModalOpen, batchAllDone]);
 
-  function mapBatchStatus(status: string): BatchItemPhase {
+  function mapBatchStatus(status: string): BatchItemPhase | null {
     switch (status) {
-      case 'queued': case 'processing': case 'fileserver_uploading': return 'queued';
-      case 'ocrprocessing':  return 'ocr_processing';
+      case 'queued':
+      case 'uploaded':
+      case 'processing':
+      case 'fileserver_uploading':
+        return 'queued';
+      case 'ocr_started':
+      case 'ocr_completed':
+      case 'ocrprocessing':
+        return 'ocr_processing';
       case 'reanalyze_queued': case 'reanalyzing': return 'ocr_processing';
-      case 'aianalyzing':    return 'analyzing';
-      case 'completed': case 'completed_with_warnings': return 'succeeded';
-      case 'failed':    return 'failed';
+      case 'draft_ready':
+      case 'analyzing':
+      case 'aianalyzing':
+        return 'analyzing';
+      case 'completed':
+      case 'completed_with_warnings':
+      case 'succeeded':
+      case 'success':
+        return 'succeeded';
+      case 'failed':
+      case 'error':
+        return 'failed';
       case 'canceled':  return 'canceled';
       case 'cancelled': return 'cancelled';
       case 'submit_queued':    return 'submit_queued';
@@ -219,7 +249,7 @@ export function PurchaseInvoice() {
       case 'submitted':        return 'submitted';
       case 'submit_failed':    return 'submit_failed';
       case 'not_ready':        return 'not_ready';
-      default:          return 'queued';
+      default:          return null;
     }
   }
 
@@ -258,7 +288,10 @@ export function PurchaseInvoice() {
       const groupAnalysisDone = data.status === 'completed' || data.status === 'completed_with_failures';
       // If a submit is in progress, don't stop until submit also completes
       const submitInProgress = data.submitStatus === 'submitting';
-      const allItemsDone = items.every((it) => terminal.has(mapBatchStatus(it.status ?? '')));
+      const allItemsDone = items.every((it) => {
+        const phase = mapBatchStatus(it.status ?? '');
+        return phase ? terminal.has(phase) : false;
+      });
       const isDone = (groupAnalysisDone && !submitInProgress) || allItemsDone;
 
       setBatchNow(Date.now());
@@ -267,8 +300,10 @@ export function PurchaseInvoice() {
         const next = prev.map((item) => {
           const snap = snapMap.get(item.id);
           if (!snap) return item;
-          const phase = mapBatchStatus(snap.status ?? '');
-          const analysisPhase = snap.analysisStatus ? mapBatchStatus(snap.analysisStatus) : (phase === 'succeeded' ? 'succeeded' : item.analysisPhase);
+          const mappedPhase = mapBatchStatus(snap.status ?? '');
+          const phase = mappedPhase ?? item.phase;
+          const mappedAnalysisPhase = snap.analysisStatus ? mapBatchStatus(snap.analysisStatus) : null;
+          const analysisPhase = mappedAnalysisPhase ?? (phase === 'succeeded' ? 'succeeded' : item.analysisPhase);
           return {
             ...item,
             phase,
@@ -361,14 +396,14 @@ export function PurchaseInvoice() {
                     continue;
                   }
                   if (ev.eventType === 'item_status_changed' && ev.itemId) {
-                    const newPhase = mapBatchStatus(ev.status ?? '');
+                    const resolvedPhase = ev.status ? mapBatchStatus(ev.status) : null;
                     setBatchNow(Date.now());
                     setBatchItems((prev) => {
                       const next = prev.map((item) =>
                         item.id === ev.itemId
                           ? {
                               ...item,
-                              phase: newPhase,
+                              phase: resolvedPhase ?? item.phase,
                               fileName: ev.fileName ?? item.fileName,
                               startedAt: parseTs(ev.startedAt) ?? item.startedAt,
                               completedAt: parseTs(ev.completedAt) ?? null,
@@ -381,7 +416,7 @@ export function PurchaseInvoice() {
                       }
                       return next;
                     });
-                    if (newPhase === 'succeeded') {
+                    if (resolvedPhase === 'succeeded') {
                       const itemId = ev.itemId;
                       void fetchBatchItemImageUrl(itemId).then((imageUrl) => {
                         if (!imageUrl || ctrl.signal.aborted) return;
@@ -408,14 +443,14 @@ export function PurchaseInvoice() {
                       ev.eventType === 'item_submitted'           ? 'submitted' :
                       ev.eventType === 'item_submit_failed'       ? 'submit_failed' :
                       ev.eventType === 'item_submit_skipped'      ? 'not_ready' : null;
-                    const newPhase: BatchItemPhase =
+                    const newPhaseCandidate: BatchItemPhase | null =
                       (phaseFromStatus && phaseFromStatus !== 'queued') ? phaseFromStatus :
-                      phaseFromEvent ?? mapBatchStatus(ev.status ?? '');
+                      phaseFromEvent ?? (ev.status ? mapBatchStatus(ev.status) : null);
                     setBatchNow(Date.now());
                     setBatchItems((prev) => {
                       const next = prev.map((item) =>
                         item.id === ev.itemId
-                          ? { ...item, phase: newPhase }
+                          ? { ...item, phase: newPhaseCandidate ?? item.phase }
                           : item
                       );
                       const terminal = new Set<BatchItemPhase>(['succeeded', 'failed', 'canceled', 'cancelled', 'submitted', 'submit_failed', 'not_ready']);
@@ -505,6 +540,246 @@ export function PurchaseInvoice() {
     }
   }
 
+  // ── History tab ───────────────────────────────────────────────────────────
+  const [activeTab, setActiveTab] = useState<'invoices' | 'history'>('invoices');
+  const [historyItems, setHistoryItems] = useState<HistoryItem[]>([]);
+  const [historyTotal, setHistoryTotal] = useState(0);
+  const [historyPage, setHistoryPage] = useState(1);
+  const [historyHasNext, setHistoryHasNext] = useState(false);
+  const [historyLoading, setHistoryLoading] = useState(false);
+  const [historyDeleteConfirmOpen, setHistoryDeleteConfirmOpen] = useState(false);
+  const [historyItemToDelete, setHistoryItemToDelete] = useState<HistoryItem | null>(null);
+  const [historyTypeFilter, setHistoryTypeFilter] = useState<'all' | 'group' | 'task'>('all');
+  const [historySearchDraft, setHistorySearchDraft] = useState('');
+  const [historySearch, setHistorySearch] = useState('');
+  const historySseRef = useRef<AbortController | null>(null);
+  const historyGetRef = useRef<AbortController | null>(null);
+  // Cache: key → { items, total, hasNext }
+  const historyCacheRef = useRef<Map<string, { items: HistoryItem[]; total: number; hasNext: boolean }>>(new Map());
+
+  function historyParamKey(page: number, type: string, search: string) {
+    return `${page}:${type}:${search}`;
+  }
+
+  // Debounce history search
+  useEffect(() => {
+    const t = window.setTimeout(() => setHistorySearch(historySearchDraft), 300);
+    return () => window.clearTimeout(t);
+  }, [historySearchDraft]);
+
+  // GET-first + SSE-for-updates pattern
+  useEffect(() => {
+    if (activeTab !== 'history' || !accessToken) return;
+
+    // Abort any in-flight SSE and GET
+    historySseRef.current?.abort();
+    historyGetRef.current?.abort();
+
+    const sseCtrl = new AbortController();
+    const getCtrl = new AbortController();
+    historySseRef.current = sseCtrl;
+    historyGetRef.current = getCtrl;
+
+    const cacheKey = historyParamKey(historyPage, historyTypeFilter, historySearch);
+    const params = new URLSearchParams({ page: String(historyPage), pageSize: '20' });
+    if (historyTypeFilter !== 'all') params.set('type', historyTypeFilter);
+    if (historySearch) params.set('q', historySearch);
+
+    // --- Phase 1: serve from cache instantly, then refresh in background ---
+    const cached = historyCacheRef.current.get(cacheKey);
+    if (cached) {
+      setHistoryItems(cached.items);
+      setHistoryTotal(cached.total);
+      setHistoryHasNext(cached.hasNext);
+      setHistoryLoading(false);
+    } else {
+      setHistoryLoading(true);
+    }
+
+    // --- Phase 2: fire GET immediately for fresh data ---
+    void (async () => {
+      try {
+        const res = await authFetch(
+          `/api/purchase-invoice/history?${params.toString()}`,
+          { signal: getCtrl.signal },
+        );
+        if (!res.ok || getCtrl.signal.aborted) return;
+        const data = await res.json() as { items?: HistoryItem[]; total?: number; hasNext?: boolean };
+        const items = data.items ?? [];
+        const total = data.total ?? 0;
+        const hasNext = data.hasNext ?? false;
+        // Update cache
+        historyCacheRef.current.set(cacheKey, { items, total, hasNext });
+        setHistoryItems(items);
+        setHistoryTotal(total);
+        setHistoryHasNext(hasNext);
+        setHistoryLoading(false);
+      } catch { /* aborted or network error — ignore */ }
+    })();
+
+    // --- Phase 3: connect SSE for real-time upsert/delete events ---
+    void (async () => {
+      try {
+        const res = await authFetch(
+          `/api/purchase-invoice/history/events?${params.toString()}`,
+          { headers: { Accept: 'text/event-stream' }, signal: sseCtrl.signal },
+        );
+        if (!res.ok || !res.body || sseCtrl.signal.aborted) return;
+        const reader = res.body.getReader();
+        const decoder = new TextDecoder();
+        let buf = '';
+        let dataLine = '';
+        let snapshotReceived = false;
+        while (true) {
+          const { done, value } = await reader.read();
+          if (sseCtrl.signal.aborted || done) break;
+          buf += decoder.decode(value, { stream: true });
+          const lines = buf.split('\n');
+          buf = lines.pop() ?? '';
+          for (const rawLine of lines) {
+            const line = rawLine.replace(/\r$/, '');
+            if (line.startsWith('data: ')) { dataLine = line.slice(6); }
+            else if (line === '' && dataLine) {
+              try {
+                const ev = JSON.parse(dataLine) as {
+                  eventType?: string;
+                  items?: HistoryItem[];
+                  item?: HistoryItem;
+                  type?: string;
+                  id?: string;
+                };
+                if (ev.eventType === 'snapshot') {
+                  // Snapshot has no total/hasNext — only use items if GET hasn't populated cache yet
+                  if (!snapshotReceived && !historyCacheRef.current.has(cacheKey)) {
+                    const items = ev.items ?? [];
+                    historyCacheRef.current.set(cacheKey, { items, total: items.length, hasNext: false });
+                    setHistoryItems(items);
+                    setHistoryTotal(items.length);
+                    setHistoryHasNext(false);
+                    setHistoryLoading(false);
+                  }
+                  snapshotReceived = true;
+                } else if (ev.eventType === 'upsert' && ev.item) {
+                  const upserted = ev.item;
+                  setHistoryItems((prev) => {
+                    const idx = prev.findIndex((i) => i.id === upserted.id);
+                    const next = idx >= 0
+                      ? prev.map((i, j) => j === idx ? upserted : i)
+                      : [upserted, ...prev];
+                    const cached2 = historyCacheRef.current.get(cacheKey);
+                    historyCacheRef.current.set(cacheKey, {
+                      items: next,
+                      total: cached2 ? (idx >= 0 ? cached2.total : cached2.total + 1) : next.length,
+                      hasNext: cached2?.hasNext ?? false,
+                    });
+                    return next;
+                  });
+                } else if (ev.eventType === 'delete' && ev.id) {
+                  const deletedId = ev.id;
+                  setHistoryItems((prev) => {
+                    const next = prev.filter((i) => i.id !== deletedId);
+                    const cached2 = historyCacheRef.current.get(cacheKey);
+                    if (cached2) {
+                      historyCacheRef.current.set(cacheKey, {
+                        ...cached2,
+                        items: next,
+                        total: Math.max(0, cached2.total - 1),
+                      });
+                    }
+                    return next;
+                  });
+                }
+              } catch { /* ignore parse errors */ }
+              dataLine = '';
+            }
+          }
+        }
+      } catch { /* aborted or SSE error — GET data already shown, no action needed */ }
+    })();
+
+    return () => {
+      sseCtrl.abort();
+      getCtrl.abort();
+    };
+  }, [activeTab, historyPage, historyTypeFilter, historySearch, accessToken]);
+
+  async function handleViewHistoryItem(item: HistoryItem) {
+    if (item.type === 'task') {
+      window.open('/purchase-invoice/' + item.taskId, '_blank');
+      return;
+    }
+    // group → load snapshot and open BatchStatusModal in current page
+    try {
+      const res = await authFetch(
+        `/api/purchase-invoice/batch/group?groupId=${encodeURIComponent(item.groupId)}`,
+      );
+      if (!res.ok) return;
+      const data = await res.json() as {
+        items?: Array<{ itemId?: string; taskId?: string; fileName?: string; status?: string; startedAt?: string; completedAt?: string }>;
+      };
+      const rawItems = data?.items ?? [];
+      const initialItems: BatchStatusItem[] = rawItems.map((it) => ({
+        id: it.itemId ?? '',
+        fileName: it.fileName ?? '',
+        fileSize: 0,
+        phase: mapBatchStatus(it.status ?? '') ?? 'queued',
+        previewTaskId: it.taskId,
+        startedAt: parseTs(it.startedAt),
+        completedAt: parseTs(it.completedAt),
+        error: null,
+      }));
+      const terminal = new Set<BatchItemPhase>(['succeeded', 'failed', 'canceled', 'cancelled', 'submitted', 'submit_failed', 'not_ready']);
+      setBatchGroupId(item.groupId);
+      setBatchItems(initialItems);
+      setBatchAllDone(initialItems.length > 0 && initialItems.every((i) => terminal.has(i.phase)));
+      setBatchNow(Date.now());
+      setBatchModalOpen(true);
+      connectBatchSSE(item.groupId);
+    } catch { /* ignore */ }
+  }
+
+  function handleHistoryDelete(item: HistoryItem) {
+    setHistoryItemToDelete(item);
+    setHistoryDeleteConfirmOpen(true);
+  }
+
+  async function confirmHistoryDelete() {
+    if (!historyItemToDelete) return;
+    const item = historyItemToDelete;
+    const params = new URLSearchParams({ type: item.type, id: item.id });
+    try {
+      const res = await authFetch(`/api/purchase-invoice/history?${params.toString()}`, { method: 'DELETE' });
+      if (res.ok) {
+        setHistoryItems((prev) => prev.filter((i) => i.id !== item.id));
+      }
+    } catch { /* ignore */ }
+  }
+
+  function historyStatusBadge(status: string) {
+    const s = status.toLowerCase();
+    if (s === 'uploading' || s === 'analyzing') {
+      return 'bg-amber-100 text-amber-700 border-amber-200';
+    }
+    if (s === 'ready' || s === 'submitted') {
+      return 'bg-emerald-100 text-emerald-700 border-emerald-200';
+    }
+    if (s === 'submitting') {
+      return 'bg-violet-100 text-violet-700 border-violet-200';
+    }
+    if (s === 'failed') {
+      return 'bg-red-100 text-red-700 border-red-200';
+    }
+    return 'bg-zinc-100 text-zinc-600 border-zinc-200';
+  }
+
+  function formatHistoryDate(iso: string) {
+    try {
+      return format(new Date(iso), 'dd MMM yyyy HH:mm');
+    } catch {
+      return iso;
+    }
+  }
+
   const [isDisplayOpen, setIsDisplayOpen] = useState(false);
   const [selectedSortLabel, setSelectedSortLabel] = useState(sortOptions[0].label);
   const [selectedAutoRefreshLabel, setSelectedAutoRefreshLabel] = useState(autoRefreshOptions[0].label);
@@ -512,6 +787,11 @@ export function PurchaseInvoice() {
   const [appliedFilters, setAppliedFilters] = useState<FilterDraft>(defaultFilters);
   const [deleteConfirmOpen, setDeleteConfirmOpen] = useState(false);
   const [invoiceToDelete, setInvoiceToDelete] = useState<EditableInvoice | null>(null);
+  const [detailModalOpen, setDetailModalOpen] = useState(false);
+  const [detailDocKey, setDetailDocKey] = useState('');
+  const [voidConfirmOpen, setVoidConfirmOpen] = useState(false);
+  const [invoiceToVoid, setInvoiceToVoid] = useState<EditableInvoice | null>(null);
+  const [voidLoading, setVoidLoading] = useState(false);
   const [items, setItems] = useState<PurchaseInvoiceListItem[]>([]);
   const [total, setTotal] = useState(0);
   const [currentPage, setCurrentPage] = useState(1);
@@ -593,7 +873,7 @@ export function PurchaseInvoice() {
   const fetchInvoices = useCallback(
     async (page: number, query: InvoiceQuery) => {
       if (!profile || !accessToken) {
-        throw new ApiRequestError('Your session is not ready yet.', 401);
+        throw new ApiRequestError('Your session is not ready yet.', 503);
       }
 
       return getPurchaseInvoiceList({
@@ -906,6 +1186,34 @@ export function PurchaseInvoice() {
 
   const handleDeleteConfirm = () => {};
 
+  const handleVoidClick = (invoice: EditableInvoice) => {
+    setInvoiceToVoid(invoice);
+    setVoidConfirmOpen(true);
+  };
+
+  const handleVoidConfirm = async () => {
+    if (!invoiceToVoid) return;
+    setVoidLoading(true);
+    try {
+      const res = await authFetch('/api/purchase-invoice/void', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ docKey: invoiceToVoid.docKey, docNo: invoiceToVoid.docNo }),
+      });
+      if (res.ok) {
+        toast.success('Invoice voided.');
+      } else {
+        toast.error('Failed to void invoice.');
+      }
+    } catch {
+      toast.error('Failed to void invoice.');
+    } finally {
+      setVoidLoading(false);
+      setVoidConfirmOpen(false);
+      setInvoiceToVoid(null);
+    }
+  };
+
   const handleApplyFilters = () => {
     setAppliedFilters({ ...draftFilters });
   };
@@ -1026,7 +1334,7 @@ export function PurchaseInvoice() {
 
     return (
       <>
-        <table className="w-full text-left text-[11px]">
+        <table className="w-full min-w-[640px] text-left text-[11px]">
           <thead className="sticky top-0 z-10 bg-white shadow-sm">
             <tr>
               <th className="bg-white pl-6 pr-3 py-1.5 font-semibold uppercase tracking-tight text-zinc-500">
@@ -1125,21 +1433,21 @@ export function PurchaseInvoice() {
                   <div className="flex items-center gap-2">
                     <button
                       type="button"
-                      disabled
-                      aria-disabled="true"
-                      className="flex cursor-not-allowed items-center gap-1 rounded border border-zinc-200 bg-zinc-100 px-1.5 py-0.5 text-zinc-400 shadow-sm opacity-70"
-                      title="Edit disabled"
+                      onClick={() => { setDetailDocKey(invoice.docKey); setDetailModalOpen(true); }}
+                      className="flex items-center gap-1 rounded border border-zinc-200 bg-white px-1.5 py-0.5 text-zinc-900 shadow-sm transition-all hover:border-zinc-300 hover:bg-zinc-50"
+                      title="View"
                     >
-                      <Pencil size={10} />
-                      <span className="text-[10px] font-semibold">Edit</span>
+                      <Eye size={10} />
+                      <span className="text-[10px] font-semibold">View</span>
                     </button>
                     <button
-                      onClick={() => handleDeleteClick(invoice)}
-                      className="flex items-center gap-1 rounded border border-zinc-200 bg-white px-1.5 py-0.5 text-zinc-900 shadow-sm transition-all hover:border-zinc-300 hover:bg-zinc-50"
-                      title="Delete"
+                      type="button"
+                      onClick={() => handleVoidClick(invoice)}
+                      className="flex items-center gap-1 rounded border border-zinc-200 bg-white px-1.5 py-0.5 text-zinc-900 shadow-sm transition-all hover:border-red-200 hover:bg-red-50"
+                      title="Void"
                     >
                       <Trash2 size={10} className="text-red-500" />
-                      <span className="text-[10px] font-semibold">Delete</span>
+                      <span className="text-[10px] font-semibold">Void</span>
                     </button>
                   </div>
                 </td>
@@ -1200,18 +1508,55 @@ export function PurchaseInvoice() {
           <div className="shrink-0 px-6 pb-1 pt-4">
             <div className="mb-0.5 flex items-center gap-2">
               <h1 className="text-xl font-bold tracking-tight text-zinc-900">Purchase Invoice</h1>
-              <span className="rounded-full border border-zinc-200 bg-zinc-100 px-2 py-0.5 text-[10px] font-semibold text-zinc-600">
-                {isInitialLoading ? '...' : total}
-              </span>
+              {activeTab === 'invoices' && (
+                <span className="rounded-full border border-zinc-200 bg-zinc-100 px-2 py-0.5 text-[10px] font-semibold text-zinc-600">
+                  {isInitialLoading ? '...' : total}
+                </span>
+              )}
+              {activeTab === 'history' && (
+                <span className="rounded-full border border-zinc-200 bg-zinc-100 px-2 py-0.5 text-[10px] font-semibold text-zinc-600">
+                  {historyLoading ? '...' : historyTotal}
+                </span>
+              )}
             </div>
             <p className="text-xs text-zinc-500">
-              {total > 0
-                ? `Loaded ${loadedCount} of ${total} invoices${profile?.bookId ? ` | ${profile.bookId}` : ''}.`
-                : 'Manage your purchase invoices and load more results as you scroll.'}
+              {activeTab === 'invoices'
+                ? total > 0
+                  ? `Loaded ${loadedCount} of ${total} invoices${profile?.bookId ? ` | ${profile.bookId}` : ''}.`
+                  : 'Manage your purchase invoices and load more results as you scroll.'
+                : 'Past invoice uploads and batch groups.'}
             </p>
           </div>
 
-          <div className="flex min-h-[40px] shrink-0 flex-col gap-3 px-6 py-2">
+          {/* Tab switcher */}
+          <div className="shrink-0 border-b border-zinc-200 px-6">
+            <div className="flex gap-0">
+              <button
+                type="button"
+                onClick={() => setActiveTab('invoices')}
+                className={`border-b-2 px-4 py-2 text-xs font-semibold transition-colors ${
+                  activeTab === 'invoices'
+                    ? 'border-zinc-900 text-zinc-900'
+                    : 'border-transparent text-zinc-500 hover:text-zinc-700'
+                }`}
+              >
+                Invoices
+              </button>
+              <button
+                type="button"
+                onClick={() => { setActiveTab('history'); setHistoryPage(1); }}
+                className={`border-b-2 px-4 py-2 text-xs font-semibold transition-colors ${
+                  activeTab === 'history'
+                    ? 'border-zinc-900 text-zinc-900'
+                    : 'border-transparent text-zinc-500 hover:text-zinc-700'
+                }`}
+              >
+                History
+              </button>
+            </div>
+          </div>
+
+          <div className={`flex min-h-[40px] shrink-0 flex-col gap-3 px-6 py-2 ${activeTab !== 'invoices' ? 'hidden' : ''}`}>
             <div className="flex items-center justify-end gap-4">
               <div className="flex items-center gap-2">
                 <div className="relative" ref={displayMenuRef}>
@@ -1462,9 +1807,150 @@ export function PurchaseInvoice() {
             </div>
           </div>
 
-          <div ref={scrollContainerRef} className="flex-1 overflow-auto">
+          <div ref={scrollContainerRef} className={`flex-1 overflow-auto ${activeTab !== 'invoices' ? 'hidden' : ''}`}>
             {renderTable()}
           </div>
+
+          <div className={`flex flex-1 flex-col overflow-hidden ${activeTab !== 'history' ? 'hidden' : ''}`}>
+              {/* History toolbar */}
+              <div className="shrink-0 flex items-center gap-3 px-6 py-2">
+                <div className="flex items-center gap-1">
+                  {(['all', 'task', 'group'] as const).map((f) => (
+                    <button
+                      key={f}
+                      type="button"
+                      onClick={() => { setHistoryTypeFilter(f); setHistoryPage(1); }}
+                      className={`rounded-full border px-3 py-1 text-[11px] font-semibold transition-colors ${
+                        historyTypeFilter === f
+                          ? 'border-zinc-900 bg-zinc-900 text-white'
+                          : 'border-zinc-200 bg-white text-zinc-600 hover:border-zinc-300 hover:bg-zinc-50'
+                      }`}
+                    >
+                      {f === 'all' ? 'All' : f === 'task' ? 'Tasks' : 'Groups'}
+                    </button>
+                  ))}
+                </div>
+                <Input
+                  type="text"
+                  value={historySearchDraft}
+                  onChange={(e) => { setHistorySearchDraft(e.target.value); setHistoryPage(1); }}
+                  placeholder="Search..."
+                  className="h-8 max-w-[200px] text-xs"
+                />
+              </div>
+
+              {/* History table */}
+              <div className="flex-1 overflow-auto">
+                {historyLoading ? (
+                  <div className="flex h-full items-center justify-center py-10">
+                    <div className="flex items-center gap-3 text-sm text-zinc-600">
+                      <LoaderCircle size={18} className="animate-spin text-zinc-500" />
+                      Loading history...
+                    </div>
+                  </div>
+                ) : historyItems.length === 0 ? (
+                  <div className="flex h-full items-center justify-center px-6 py-16">
+                    <div className="max-w-xs text-center">
+                      <div className="mx-auto mb-4 flex h-14 w-14 items-center justify-center rounded-full bg-zinc-100 text-zinc-400">
+                        <Clock3 size={24} strokeWidth={1.5} />
+                      </div>
+                      <h3 className="text-sm font-semibold text-zinc-900">No history yet</h3>
+                      <p className="mt-1.5 text-xs leading-5 text-zinc-500">
+                        {historySearch || historyTypeFilter !== 'all'
+                          ? 'No items match your current filter or search.'
+                          : 'Upload or process an invoice to see it appear here.'}
+                      </p>
+                    </div>
+                  </div>
+                ) : (
+                  <table className="w-full min-w-[640px] table-fixed text-left text-[11px]">
+                    <thead className="sticky top-0 z-10 bg-white shadow-sm">
+                      <tr>
+                        <th className="w-20 bg-white pl-6 pr-3 py-2 font-semibold uppercase tracking-tight text-zinc-500">Type</th>
+                        <th className="bg-white px-3 py-2 font-semibold uppercase tracking-tight text-zinc-500">ID</th>
+                        <th className="w-32 bg-white px-3 py-2 font-semibold uppercase tracking-tight text-zinc-500">Status</th>
+                        <th className="w-40 bg-white px-3 py-2 font-semibold uppercase tracking-tight text-zinc-500">Created</th>
+                        <th className="w-28 bg-white pl-3 pr-6 py-2 font-semibold uppercase tracking-tight text-zinc-500">Actions</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {historyItems.map((item) => (
+                        <tr key={item.id} className="group border-t border-zinc-100 hover:bg-zinc-50/60">
+                          <td className="pl-6 pr-3 py-2">
+                            <span
+                              className={`rounded-full border px-2 py-0.5 text-[9px] font-bold uppercase tracking-wider ${
+                                item.type === 'group'
+                                  ? 'border-blue-200 bg-blue-100 text-blue-700'
+                                  : 'border-zinc-200 bg-zinc-100 text-zinc-600'
+                              }`}
+                            >
+                              {item.type === 'group' ? 'Group' : 'Task'}
+                            </span>
+                          </td>
+                          <td className="px-3 py-2">
+                            <span
+                              className="block max-w-full truncate font-mono text-[10px] text-zinc-700"
+                              title={item.type === 'group' ? item.groupId : item.taskId}
+                            >
+                              {item.type === 'group' ? item.groupId : item.taskId}
+                            </span>
+                          </td>
+                          <td className="px-3 py-2">
+                            <span className={`rounded-full border px-2 py-0.5 text-[9px] font-semibold uppercase tracking-wider ${historyStatusBadge(item.status)}`}>
+                              {item.status}
+                            </span>
+                          </td>
+                          <td className="px-3 py-2 text-zinc-500">{formatHistoryDate(item.createdAt)}</td>
+                          <td className="pl-3 pr-6 py-2">
+                            <div className="flex items-center gap-1.5">
+                              <button
+                                type="button"
+                                onClick={() => void handleViewHistoryItem(item)}
+                                className="flex items-center gap-1 rounded border border-zinc-200 bg-white px-1.5 py-0.5 text-[10px] font-semibold text-zinc-700 shadow-sm transition-all hover:border-zinc-300 hover:bg-zinc-50"
+                              >
+                                <ArrowUpRight size={11} />
+                                View
+                              </button>
+                              <button
+                                type="button"
+                                onClick={() => handleHistoryDelete(item)}
+                                className="flex items-center rounded border border-zinc-200 bg-white p-0.5 text-zinc-700 shadow-sm transition-all hover:border-red-200 hover:bg-red-50"
+                                title="Delete"
+                              >
+                                <Trash2 size={11} className="text-red-500" />
+                              </button>
+                            </div>
+                          </td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                )}
+              </div>
+
+              {/* History pagination */}
+              {!historyLoading && (historyPage > 1 || historyHasNext) && (
+                <div className="shrink-0 flex items-center justify-center gap-3 border-t border-zinc-100 px-6 py-2">
+                  <button
+                    type="button"
+                    disabled={historyPage <= 1}
+                    onClick={() => setHistoryPage((p) => p - 1)}
+                    className="rounded border border-zinc-200 bg-white px-3 py-1 text-[11px] font-semibold text-zinc-700 shadow-sm transition hover:bg-zinc-50 disabled:cursor-not-allowed disabled:opacity-40"
+                  >
+                    Previous
+                  </button>
+                  <span className="text-[11px] text-zinc-500">Page {historyPage}</span>
+                  <button
+                    type="button"
+                    disabled={!historyHasNext}
+                    onClick={() => setHistoryPage((p) => p + 1)}
+                    className="rounded border border-zinc-200 bg-white px-3 py-1 text-[11px] font-semibold text-zinc-700 shadow-sm transition hover:bg-zinc-50 disabled:cursor-not-allowed disabled:opacity-40"
+                  >
+                    Next
+                  </button>
+                </div>
+              )}
+            </div>
 
           <UploadInvoiceModal
             isOpen={isUploadModalOpen}
@@ -1485,6 +1971,21 @@ export function PurchaseInvoice() {
             submittingItems={submittingItems}
           />
 
+          <InvoiceDetailModal
+            isOpen={detailModalOpen}
+            docKey={detailDocKey}
+            onClose={() => setDetailModalOpen(false)}
+          />
+
+          <DeleteConfirmModal
+            isOpen={voidConfirmOpen}
+            onClose={() => { setVoidConfirmOpen(false); setInvoiceToVoid(null); }}
+            onConfirm={() => void handleVoidConfirm()}
+            title="Void Invoice"
+            itemName={invoiceToVoid?.docNo}
+            message="This will send a void request to the accounting system. This cannot be undone."
+          />
+
           <DeleteConfirmModal
             isOpen={deleteConfirmOpen}
             onClose={() => setDeleteConfirmOpen(false)}
@@ -1492,6 +1993,15 @@ export function PurchaseInvoice() {
             title="Delete Invoice"
             itemName={invoiceToDelete?.supplierInvoiceNo}
             message="This invoice will be permanently removed from your records."
+          />
+
+          <DeleteConfirmModal
+            isOpen={historyDeleteConfirmOpen}
+            onClose={() => { setHistoryDeleteConfirmOpen(false); setHistoryItemToDelete(null); }}
+            onConfirm={() => void confirmHistoryDelete()}
+            title="Remove History"
+            itemName={historyItemToDelete ? (historyItemToDelete.type === 'group' ? historyItemToDelete.groupId : historyItemToDelete.taskId) : undefined}
+            message="This will hide the history record. The original invoice data will not be deleted."
           />
       </motion.div>
     </AnimatePresence>

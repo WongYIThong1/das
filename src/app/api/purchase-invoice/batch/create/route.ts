@@ -38,9 +38,10 @@ export async function POST(request: Request) {
     for (const fileEntry of files) {
       form.append('file', fileEntry);
     }
+    const headers: Record<string, string> = { Authorization: authorization };
     const response = await fetch(`${baseUrl}/user/purchase-invoice/batch/create`, {
       method: 'POST',
-      headers: { Authorization: authorization },
+      headers,
       body: form,
     });
     const text = await response.text();
@@ -48,8 +49,12 @@ export async function POST(request: Request) {
     try { data = JSON.parse(text); } catch { /* non-JSON */ }
     if (!response.ok) {
       const err = (data as any) ?? {};
+      const payload =
+        err && typeof err === 'object'
+          ? err
+          : { error: err?.error ?? err?.message ?? (text.slice(0, 200) || 'upstream_error') };
       return NextResponse.json(
-        { error: err.error ?? err.message ?? (text.slice(0, 200) || 'upstream_error') },
+        payload,
         { status: response.status },
       );
     }

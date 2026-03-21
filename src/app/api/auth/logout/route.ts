@@ -22,24 +22,24 @@ export async function POST(request: Request) {
   }
 
   if (result.ok) {
-    const response = applySetCookies(NextResponse.json(result.data, { status: result.status }), result.setCookies);
+    const response = NextResponse.json(result.data, { status: result.status });
     response.cookies.delete(REGISTER_PENDING_COOKIE);
     response.cookies.delete(LOGIN_PENDING_COOKIE);
-    clearAppSessionCookie(response);
-    return response;
+    clearAppSessionCookie(response, request);
+    return applySetCookies(response, result.setCookies, request);
   }
 
   if ('error' in result) {
-    const response = applySetCookies(jsonError(result.error, result.status), result.setCookies);
+    const response = jsonError(result.error, result.status);
     response.cookies.delete(REGISTER_PENDING_COOKIE);
     response.cookies.delete(LOGIN_PENDING_COOKIE);
-    clearAppSessionCookie(response);
-    return response;
+    clearAppSessionCookie(response, request);
+    return applySetCookies(response, result.setCookies, request);
   }
 
   const response = jsonError('service_unavailable', 503);
   response.cookies.delete(REGISTER_PENDING_COOKIE);
   response.cookies.delete(LOGIN_PENDING_COOKIE);
-  clearAppSessionCookie(response);
+  clearAppSessionCookie(response, request);
   return response;
 }

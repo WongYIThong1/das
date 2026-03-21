@@ -11,7 +11,7 @@ export async function GET() {
   if (!pendingAuthFlow) {
     cookieStore.delete(REGISTER_PENDING_COOKIE);
     cookieStore.delete(LOGIN_PENDING_COOKIE);
-    return NextResponse.json({ error: 'not_found' }, { status: 404 });
+    return NextResponse.json({ pendingAuthFlow: null }, { status: 200 });
   }
 
   const sanitizedPendingAuthFlow =

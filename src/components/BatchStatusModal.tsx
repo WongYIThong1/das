@@ -194,13 +194,13 @@ export function BatchStatusModal({
 
             {/* ── Table ────────────────────────────────────────────────── */}
             <div className="flex-1 overflow-y-auto min-h-0">
-              <table className="w-full text-sm">
+              <table className="w-full text-sm table-fixed">
                 <thead>
                   <tr className="border-b border-zinc-100 bg-zinc-50">
-                    <th className="px-6 py-2.5 text-left text-[11px] font-semibold uppercase tracking-wider text-zinc-400 w-full">File</th>
-                    <th className="px-4 py-2.5 text-left text-[11px] font-semibold uppercase tracking-wider text-zinc-400 whitespace-nowrap">Status</th>
-                    <th className="px-4 py-2.5 text-right text-[11px] font-semibold uppercase tracking-wider text-zinc-400 whitespace-nowrap">Time</th>
-                    <th className="px-6 py-2.5 text-right text-[11px] font-semibold uppercase tracking-wider text-zinc-400">Actions</th>
+                    <th className="px-6 py-2.5 text-left text-[11px] font-semibold uppercase tracking-wider text-zinc-400">File</th>
+                    <th className="px-4 py-2.5 text-left text-[11px] font-semibold uppercase tracking-wider text-zinc-400 w-36">Status</th>
+                    <th className="px-4 py-2.5 text-right text-[11px] font-semibold uppercase tracking-wider text-zinc-400 w-24">Time</th>
+                    <th className="px-6 py-2.5 text-right text-[11px] font-semibold uppercase tracking-wider text-zinc-400 w-52">Actions</th>
                   </tr>
                 </thead>
                 <tbody className="divide-y divide-zinc-50">
@@ -243,7 +243,7 @@ export function BatchStatusModal({
                                 <FileText size={14} className="text-zinc-400" />
                               )}
                             </div>
-                            <span className="truncate text-[13px] font-medium text-zinc-800 max-w-xs" title={item.fileName}>
+                            <span className="truncate text-[13px] font-medium text-zinc-800 min-w-0" title={item.fileName}>
                               {item.fileName}
                             </span>
                           </div>
