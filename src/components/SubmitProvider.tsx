@@ -167,9 +167,11 @@ export function SubmitProvider({ children }: { children: React.ReactNode }) {
     listenAbortRef.current = null;
     writeStored(null);
     setIsOpen(false);
-    setStatus(null);
-    setTask(null);
     setErrorMessage(null);
+    // Keep terminal success status so the page badge + buttons stay correct
+    // after the user closes the progress modal.
+    setStatus((prev) => (prev === 'submitted' || prev === 'completed') ? prev : null);
+    setTask((prev) => (prev?.status === 'submitted' || prev?.status === 'completed') ? prev : null);
   }, []);
 
   // Processes a snapshot/status object from either SSE or polling.

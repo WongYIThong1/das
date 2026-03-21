@@ -77,6 +77,9 @@ export default function PurchaseInvoiceTaskPage({
 
   const { profile, accessToken } = useAuth();
   const { startSubmit, isRunning: submitting, status: submitStatus } = useSubmit();
+  // Tracks whether this task was already submitted (persists across modal dismissal
+  // and covers tasks loaded from a previous session where submitStatus starts null).
+  const [pageAlreadySubmitted, setPageAlreadySubmitted] = useState(false);
   const { startReanalyze, isRunning: reanalyzeRunning } = usePreviewProgress();
   const [loading, setLoading] = useState(true);
   const [loadError, setLoadError] = useState<string | null>(null);
@@ -243,6 +246,14 @@ export default function PurchaseInvoiceTaskPage({
       });
     return () => { isMounted = false; controller.abort(); };
   }, [router, taskId, loadNonce, accessToken]);
+
+  // Once submit reaches a terminal success, latch pageAlreadySubmitted so the
+  // badge and buttons stay correct even after the progress modal is dismissed.
+  useEffect(() => {
+    if (submitStatus === 'submitted' || submitStatus === 'completed') {
+      setPageAlreadySubmitted(true);
+    }
+  }, [submitStatus]);
 
   // Backend may mark task succeeded before image rendering is available.
   // Retry a few times in background so users don't need manual refresh.
@@ -1251,8 +1262,10 @@ export default function PurchaseInvoiceTaskPage({
   const previewImageSrc = buildAssetProxyUrl(earlyImageUrl);
   const previewDocumentSrc = buildAssetProxyUrl(earlyExternalLink || payload?.externalLink || null);
 
+  const isSubmitted = pageAlreadySubmitted || submitStatus === 'submitted' || submitStatus === 'completed';
+
   const statusLabel =
-    submitStatus === 'completed' || submitStatus === 'submitted'
+    isSubmitted
       ? 'Submitted'
       : taskStatus === 'queued'
         ? 'Queued'
@@ -1293,7 +1306,7 @@ export default function PurchaseInvoiceTaskPage({
                   <Download className="h-4 w-4" />
                   Download Original
                 </a>
-                {submitStatus !== 'completed' && submitStatus !== 'submitted' && (
+                {!isSubmitted && (
                   <button
                     type="button"
                     onClick={handleReanalyze}
@@ -1384,7 +1397,7 @@ export default function PurchaseInvoiceTaskPage({
         <div className="flex items-center gap-3">
           <h1 className="text-xl font-semibold tracking-tight text-zinc-950">Purchase invoice review draft</h1>
           {statusLabel ? (
-            <span className={`inline-flex items-center rounded-full border px-2.5 py-1 text-[11px] font-semibold ${submitStatus === 'completed' || submitStatus === 'submitted' ? 'border-emerald-200 bg-emerald-50 text-emerald-700' : 'border-zinc-200 bg-zinc-50 text-zinc-600'}`}>
+            <span className={`inline-flex items-center rounded-full border px-2.5 py-1 text-[11px] font-semibold ${isSubmitted ? 'border-emerald-200 bg-emerald-50 text-emerald-700' : 'border-zinc-200 bg-zinc-50 text-zinc-600'}`}>
               {statusLabel}
             </span>
           ) : null}
@@ -1408,7 +1421,7 @@ export default function PurchaseInvoiceTaskPage({
                 <Download className="h-4 w-4" />
                 Download Original
               </a>
-              {submitStatus !== 'completed' && submitStatus !== 'submitted' && (
+              {!isSubmitted && (
                 <button
                   type="button"
                   onClick={handleReanalyze}
@@ -1432,7 +1445,7 @@ export default function PurchaseInvoiceTaskPage({
               Stats
             </button>
           )}
-          {submitStatus !== 'completed' && submitStatus !== 'submitted' && (
+          {!isSubmitted && (
             <button
               type="button"
               onClick={handleSubmit}
@@ -1948,6 +1961,11 @@ export default function PurchaseInvoiceTaskPage({
                         </button>
                       </div>
                       </div>
+                      {item.description && (
+                        <p className="text-xs text-zinc-400 px-1 truncate" title={item.description}>
+                          {item.description}
+                        </p>
+                      )}
                     </div>
                   ))}
                 </div>
