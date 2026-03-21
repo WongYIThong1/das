@@ -1313,48 +1313,68 @@ export default function PurchaseInvoiceTaskPage({
   if (loading) {
     return (
       <div className="flex h-screen flex-col bg-white">
-        <div className="flex shrink-0 items-center justify-between gap-4 border-b border-zinc-200/80 bg-white/80 px-6 py-4 backdrop-blur-md sticky top-0 z-10">
+        {/* Skeleton header */}
+        <div className="flex shrink-0 items-center justify-between gap-4 border-b border-zinc-200/80 bg-white/80 px-6 py-4 sticky top-0 z-10">
           <div className="flex items-center gap-3">
-            <h1 className="text-xl font-semibold tracking-tight text-zinc-950">Purchase invoice review draft</h1>
-            {statusLabel ? (
-              <span className="inline-flex items-center rounded-full border border-zinc-200 bg-zinc-50 px-2.5 py-1 text-[11px] font-semibold text-zinc-600">
-                {statusLabel}
-              </span>
-            ) : null}
+            <div className="h-6 w-52 animate-pulse rounded-lg bg-zinc-200" />
+            <div className="h-5 w-20 animate-pulse rounded-full bg-zinc-100" />
           </div>
           <div className="flex items-center gap-3">
-            <Link href={isGroup && groupId ? `/purchase-invoice/batch/${groupId}` : '/purchase-invoice'} className="rounded-xl px-4 py-2 text-sm font-medium text-zinc-600 transition hover:bg-zinc-100 hover:text-zinc-900">Back</Link>
-            {downloadOriginalHref ? (
-              <div className="flex items-center gap-2">
-                <a
-                  href={downloadOriginalHref}
-                  target="_blank"
-                  rel="noopener noreferrer"
-                  className="inline-flex items-center gap-2 rounded-xl border border-zinc-200 bg-white px-4 py-2 text-sm font-medium text-zinc-900 transition hover:bg-zinc-50"
-                >
-                  <Download className="h-4 w-4" />
-                  Download Original
-                </a>
-                {!isSubmitted && (
-                  <button
-                    type="button"
-                    onClick={handleReanalyze}
-                    disabled={reanalyzeRunning || submitting}
-                    className="inline-flex items-center gap-2 rounded-xl border border-zinc-200 bg-white px-4 py-2 text-sm font-medium text-zinc-900 transition hover:bg-zinc-50 disabled:opacity-50"
-                    title="Re-run OCR and AI extraction for this invoice"
-                  >
-                    {reanalyzeRunning ? <Loader2 className="h-4 w-4 animate-spin" /> : <RefreshCcw className="h-4 w-4" />}
-                    Reanalyze
-                  </button>
-                )}
-              </div>
-            ) : null}
+            <div className="h-9 w-14 animate-pulse rounded-xl bg-zinc-100" />
+            <div className="h-9 w-36 animate-pulse rounded-xl bg-zinc-100" />
+            <div className="h-9 w-44 animate-pulse rounded-xl bg-zinc-200" />
           </div>
         </div>
-        <div className="flex-1 flex items-center justify-center">
-          <div className="flex flex-col items-center gap-4 text-zinc-500">
-            <Loader2 className="h-8 w-8 animate-spin text-zinc-400" />
-            <p className="text-sm">Loading preview...</p>
+
+        {/* Skeleton body — mirrors the two-column layout */}
+        <div className="min-h-0 flex-1 overflow-hidden grid grid-cols-1 lg:grid-cols-[1fr_1.1fr]">
+          {/* Left: form */}
+          <div className="p-8 border-r border-gray-100 overflow-y-auto space-y-8">
+            <div className="h-5 w-32 animate-pulse rounded-lg bg-zinc-200" />
+
+            {/* 3-col field group */}
+            <div className="grid grid-cols-3 gap-4">
+              {Array.from({ length: 6 }).map((_, i) => (
+                <div key={i} className="space-y-2">
+                  <div className="h-3.5 w-24 animate-pulse rounded bg-zinc-200" />
+                  <div className="h-[42px] w-full animate-pulse rounded-lg bg-zinc-100" />
+                </div>
+              ))}
+            </div>
+
+            {/* Items section */}
+            <div className="space-y-3">
+              <div className="h-3.5 w-28 animate-pulse rounded bg-zinc-200" />
+              {/* Column headers */}
+              <div className="grid grid-cols-7 gap-2">
+                {Array.from({ length: 7 }).map((_, i) => (
+                  <div key={i} className="h-3 animate-pulse rounded bg-zinc-100" />
+                ))}
+              </div>
+              {/* 3 skeleton rows */}
+              {Array.from({ length: 3 }).map((_, i) => (
+                <div key={i} className="grid grid-cols-7 gap-2">
+                  {Array.from({ length: 7 }).map((_, j) => (
+                    <div key={j} className="h-[38px] animate-pulse rounded-lg bg-zinc-100" />
+                  ))}
+                </div>
+              ))}
+            </div>
+
+            {/* Totals */}
+            <div className="flex justify-end">
+              <div className="space-y-2 w-48">
+                <div className="h-3.5 w-full animate-pulse rounded bg-zinc-100" />
+                <div className="h-3.5 w-full animate-pulse rounded bg-zinc-100" />
+                <div className="h-4 w-full animate-pulse rounded bg-zinc-200" />
+              </div>
+            </div>
+          </div>
+
+          {/* Right: image placeholder */}
+          <div className="p-8 flex flex-col gap-4">
+            <div className="h-5 w-28 animate-pulse rounded-lg bg-zinc-200" />
+            <div className="flex-1 min-h-[400px] animate-pulse rounded-2xl bg-zinc-100" />
           </div>
         </div>
       </div>
