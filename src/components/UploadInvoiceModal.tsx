@@ -20,7 +20,7 @@ interface UploadInvoiceModalProps {
   onBatchCreated?: (payload: BatchCreatedPayload) => void;
 }
 
-const ALLOWED_TYPES = new Set(['application/pdf', 'image/png', 'image/jpeg', 'image/webp']);
+const ALLOWED_TYPES = new Set(['application/pdf', 'image/png', 'image/jpeg', 'image/jpg', 'image/webp', 'image/heic', 'image/heif']);
 const MAX_FILE_SIZE = 20 * 1024 * 1024;
 const MAX_FILES = 100;
 const POLL_INTERVAL_MS = 1500;
@@ -65,9 +65,9 @@ function isSupportedFile(file: File) {
 }
 
 function isImageFile(file: File) {
-  if (['image/png', 'image/jpeg', 'image/webp'].includes(file.type)) return true;
+  if (['image/png', 'image/jpeg', 'image/jpg', 'image/webp', 'image/heic', 'image/heif'].includes(file.type)) return true;
   const n = file.name.toLowerCase();
-  return ['.png', '.jpg', '.jpeg', '.webp'].some((e) => n.endsWith(e));
+  return ['.png', '.jpg', '.jpeg', '.webp', '.heic', '.heif'].some((e) => n.endsWith(e));
 }
 
 function formatBytes(b: number) {
