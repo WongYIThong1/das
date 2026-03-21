@@ -2,10 +2,13 @@ const ALLOWED_UPLOAD_MIME_TYPES = new Set([
   'application/pdf',
   'image/png',
   'image/jpeg',
+  'image/jpg',   // non-standard but common on Android
   'image/webp',
+  'image/heic',  // iOS default camera format
+  'image/heif',
 ]);
 
-const ALLOWED_UPLOAD_EXTENSIONS = ['.pdf', '.png', '.jpg', '.jpeg', '.webp'];
+const ALLOWED_UPLOAD_EXTENSIONS = ['.pdf', '.png', '.jpg', '.jpeg', '.webp', '.heic', '.heif'];
 
 export const MAX_UPLOAD_FILE_SIZE_BYTES = 20 * 1024 * 1024;
 export const MAX_UPLOAD_BATCH_FILES = 100;

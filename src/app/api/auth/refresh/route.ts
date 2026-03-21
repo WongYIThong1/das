@@ -6,10 +6,10 @@ import { clearAppSessionCookie, clearRefreshTokenCookie, setAppSessionCookie } f
 function normalizeRedirectPath(raw: string | null | undefined) {
   const candidate = raw?.trim();
   if (!candidate || !candidate.startsWith('/') || candidate.startsWith('//')) {
-    return '/home';
+    return '/purchase-invoice';
   }
   if (candidate.startsWith('/api/auth/refresh')) {
-    return '/home';
+    return '/purchase-invoice';
   }
   return candidate;
 }
@@ -96,7 +96,7 @@ export async function GET(request: Request) {
 
   const target = redirectTo(request, '/login');
   const response = 'error' in result ? applySetCookies(target, result.setCookies, request) : target;
-  if (redirectPath !== '/home') {
+  if (redirectPath !== '/purchase-invoice') {
     const loginUrl = new URL(response.headers.get('location') ?? '/login', url.origin);
     loginUrl.searchParams.set('redirect', redirectPath);
     response.headers.set('location', loginUrl.toString());

@@ -1,6 +1,50 @@
 import { NextResponse } from 'next/server';
 import { validateInvoiceUploadFile } from '../../../../lib/upload-validation';
 
+// Maps MIME types to canonical extensions for normalization.
+const MIME_TO_EXT: Record<string, string> = {
+  'image/jpeg': '.jpg',
+  'image/jpg':  '.jpg',
+  'image/png':  '.png',
+  'image/webp': '.webp',
+  'image/heic': '.jpg',   // HEIC — rename to .jpg so backend accepts it
+  'image/heif': '.jpg',
+  'application/pdf': '.pdf',
+};
+
+// Returns the MIME type the backend should see (normalize non-standard types).
+const MIME_NORMALIZE: Record<string, string> = {
+  'image/jpg':  'image/jpeg',
+  'image/heic': 'image/jpeg',
+  'image/heif': 'image/jpeg',
+};
+
+/**
+ * Ensure the file has a proper extension and a canonical MIME type.
+ * Camera captures on mobile often produce files named "image" with no extension.
+ */
+function normalizeUploadFile(file: File): File {
+  const mime = file.type.toLowerCase();
+  const normalizedMime = MIME_NORMALIZE[mime] ?? mime;
+  const expectedExt = MIME_TO_EXT[mime];
+
+  if (!expectedExt) return file;
+
+  // Check if the filename already has a valid extension.
+  const nameLower = file.name.toLowerCase();
+  const hasExt = ['.jpg', '.jpeg', '.png', '.webp', '.pdf', '.heic', '.heif'].some((e) =>
+    nameLower.endsWith(e),
+  );
+
+  // Derive a clean base name (strip any existing extension-like suffix).
+  const baseName = hasExt ? file.name.replace(/\.[^.]+$/, '') : file.name || 'photo';
+  const finalName = `${baseName}${expectedExt}`;
+
+  if (finalName === file.name && normalizedMime === mime) return file;
+
+  return new File([file], finalName, { type: normalizedMime });
+}
+
 function getBackendBaseUrl() {
   const baseUrl = process.env.BACKEND_BASE_URL?.trim();
   if (!baseUrl) return null;
@@ -35,7 +79,8 @@ export async function POST(request: Request) {
     if (validationError) {
       return NextResponse.json({ error: validationError }, { status: 400 });
     }
-    form.append('file', fileEntry);
+    const normalizedFile = normalizeUploadFile(fileEntry as File);
+    form.append('file', normalizedFile, normalizedFile.name);
 
     const headers: Record<string, string> = { Authorization: authorization };
     const response = await fetch(upstreamUrl, {

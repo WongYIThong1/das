@@ -82,7 +82,7 @@ export default function AuthGate({ children }: { children: ReactNode }) {
 
     // If the user is already authenticated but a stale pendingAuthFlow was
     // restored from the backend (e.g. from a previous incomplete login), clear
-    // it silently. Without this, the gate bounces: /home → /totp → /home → …
+    // it silently. Without this, the gate bounces: /purchase-invoice → /totp → /purchase-invoice → …
     if (isAuthenticated && pendingAuthFlow && !clearedStaleFlowRef.current) {
       clearedStaleFlowRef.current = true;
       void clearPendingAuthFlow();
@@ -97,7 +97,7 @@ export default function AuthGate({ children }: { children: ReactNode }) {
 
     if (isPublicAuthPath(pathname)) {
       if (isAuthenticated) {
-        router.replace('/home');
+        router.replace('/purchase-invoice');
         return;
       }
 
@@ -114,7 +114,7 @@ export default function AuthGate({ children }: { children: ReactNode }) {
     if (!isAuthenticated) {
       // Clear server-side session cookie before redirecting to prevent a
       // redirect loop: if the cookie is still set, (auth)/layout would
-      // immediately redirect back to /home on every page load.
+      // immediately redirect back to /purchase-invoice on every page load.
       void logoutSession().catch(() => {}).finally(() => {
         router.replace('/login');
       });
