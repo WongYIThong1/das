@@ -18,6 +18,44 @@ function hasAllowedExtension(fileName: string) {
   return ALLOWED_UPLOAD_EXTENSIONS.some((ext) => normalized.endsWith(ext));
 }
 
+const MIME_TO_EXT: Record<string, string> = {
+  'image/jpeg':      '.jpg',
+  'image/jpg':       '.jpg',
+  'image/png':       '.png',
+  'image/webp':      '.webp',
+  'image/heic':      '.jpg',
+  'image/heif':      '.jpg',
+  'application/pdf': '.pdf',
+};
+
+const MIME_NORMALIZE: Record<string, string> = {
+  'image/jpg':  'image/jpeg',
+  'image/heic': 'image/jpeg',
+  'image/heif': 'image/jpeg',
+};
+
+/**
+ * Ensure the file has a proper extension and canonical MIME type.
+ * Camera captures on mobile often produce files named "image" or without extension.
+ */
+export function normalizeUploadFile(file: File): File {
+  const mime = file.type.toLowerCase();
+  const normalizedMime = MIME_NORMALIZE[mime] ?? mime;
+  const expectedExt = MIME_TO_EXT[mime];
+
+  if (!expectedExt) return file;
+
+  const nameLower = file.name.toLowerCase();
+  const hasExt = ['.jpg', '.jpeg', '.png', '.webp', '.pdf', '.heic', '.heif'].some((e) =>
+    nameLower.endsWith(e),
+  );
+  const baseName = hasExt ? file.name.replace(/\.[^.]+$/, '') : file.name || 'photo';
+  const finalName = `${baseName}${expectedExt}`;
+
+  if (finalName === file.name && normalizedMime === mime) return file;
+  return new File([file], finalName, { type: normalizedMime });
+}
+
 export type UploadValidationError =
   | 'invalid_file'
   | 'empty_file'

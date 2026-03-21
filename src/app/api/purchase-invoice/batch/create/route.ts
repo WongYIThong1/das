@@ -2,6 +2,7 @@ import { NextResponse } from 'next/server';
 import {
   MAX_UPLOAD_BATCH_FILES,
   validateInvoiceUploadFile,
+  normalizeUploadFile,
 } from '../../../../../lib/upload-validation';
 
 function getBackendBaseUrl() {
@@ -36,7 +37,8 @@ export async function POST(request: Request) {
 
     const form = new FormData();
     for (const fileEntry of files) {
-      form.append('file', fileEntry);
+      const normalized = normalizeUploadFile(fileEntry as File);
+      form.append('file', normalized, normalized.name);
     }
     const headers: Record<string, string> = { Authorization: authorization };
     const response = await fetch(`${baseUrl}/user/purchase-invoice/batch/create`, {
