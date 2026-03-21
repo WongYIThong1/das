@@ -189,6 +189,7 @@ export default function PurchaseInvoiceTaskPage({
           const previewMatches: PurchaseInvoicePreviewMatches = res.matches || {};
           setMatches(previewMatches);
 
+
           // Auto-enable autocreate whenever the backend proposes a new item.
           // This keeps `isAutoCreate` aligned with the server-side proposal.
           const p = res.payload as PurchaseInvoicePreviewPayload;
@@ -247,13 +248,31 @@ export default function PurchaseInvoiceTaskPage({
     return () => { isMounted = false; controller.abort(); };
   }, [router, taskId, loadNonce, accessToken]);
 
-  // Once submit reaches a terminal success, latch pageAlreadySubmitted so the
-  // badge and buttons stay correct even after the progress modal is dismissed.
+  // On mount: query history API to check if this task was already submitted
+  // (handles page refresh after submission).
   useEffect(() => {
-    if (submitStatus === 'submitted' || submitStatus === 'completed') {
+    if (!taskId || !accessToken) return;
+    let cancelled = false;
+    authFetch(`/api/purchase-invoice/history?q=${encodeURIComponent(taskId)}&type=task&pageSize=5`, {
+      headers: { Authorization: `Bearer ${accessToken}` },
+    })
+      .then((res) => res.json())
+      .then((data: any) => {
+        if (cancelled) return;
+        const items: any[] = data?.items ?? [];
+        const found = items.find((item) => item.taskId === taskId && item.status === 'submitted');
+        if (found) setPageAlreadySubmitted(true);
+      })
+      .catch(() => { /* ignore — non-critical */ });
+    return () => { cancelled = true; };
+  }, [taskId, accessToken]);
+
+  // Once submit reaches a terminal success, latch pageAlreadySubmitted.
+  useEffect(() => {
+    if ((submitStatus === 'submitted' || submitStatus === 'completed') && taskId) {
       setPageAlreadySubmitted(true);
     }
-  }, [submitStatus]);
+  }, [submitStatus, taskId]);
 
   // Backend may mark task succeeded before image rendering is available.
   // Retry a few times in background so users don't need manual refresh.
@@ -661,6 +680,16 @@ export default function PurchaseInvoiceTaskPage({
       toast.error('Submit all failed.');
     }
   }
+
+  // When the AI returns a creditorCode but we have no display name yet,
+  // fetch the creditor detail to populate the button label.
+  useEffect(() => {
+    const code = payload?.creditorCode;
+    if (!code || creditorCompanyName || !accessToken) return;
+    void getCreditorDetail(code, accessToken).then((detail) => {
+      if (detail?.companyName) setCreditorCompanyName(detail.companyName);
+    });
+  }, [payload?.creditorCode, creditorCompanyName, accessToken]);
 
   useEffect(() => {
     if (!isCreditorOpen) {
@@ -1695,7 +1724,7 @@ export default function PurchaseInvoiceTaskPage({
                 />
               </div>
 
-              <div className={cn("p-4 rounded-xl transition-all duration-200", checkWarning('missing_items') ? "border-2 border-yellow-400 bg-yellow-50/20 ring-4 ring-yellow-400/10" : "")}>
+              <div className={cn("p-4 rounded-xl transition-all duration-200", !isSubmitted && checkWarning('missing_items') ? "border-2 border-yellow-400 bg-yellow-50/20 ring-4 ring-yellow-400/10" : "")}>
                 <label className="flex items-center gap-2 text-sm font-medium text-gray-700 mb-3">
                   Items Details
                   <FieldWarning code="missing_items" customMsg="Missing Items" />
@@ -1727,7 +1756,7 @@ export default function PurchaseInvoiceTaskPage({
                           const lineWarnings = warnings
                             .filter((w) => isWarningObject(w) && (w as any).line === index + 1)
                             .map((w) => w as { code: string; message?: string });
-                          if (lineWarnings.length === 0) return null;
+                          if (lineWarnings.length === 0 || isSubmitted) return null;
                           return (
                             <Tooltip>
                               <TooltipTrigger asChild>
