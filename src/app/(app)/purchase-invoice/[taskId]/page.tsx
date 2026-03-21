@@ -1966,12 +1966,24 @@ export default function PurchaseInvoiceTaskPage({
                       <div className="w-full border rounded-lg px-2 py-2 text-sm text-center bg-zinc-50 text-zinc-600 h-[38px] flex items-center justify-center">
                         {item.uom || ''}
                       </div>
-                      <div className="w-full border rounded-lg px-2 py-2 text-sm text-right bg-zinc-50 text-zinc-600 h-[38px] flex items-center justify-end">
-                        {String(item.unitPrice)}
-                      </div>
-                      <div className="w-full border rounded-lg px-2 py-2 text-sm text-right bg-zinc-50 text-zinc-600 h-[38px] flex items-center justify-end">
-                        {String(item.amount)}
-                      </div>
+                      <input
+                        type="number"
+                        min="0"
+                        step="0.01"
+                        disabled={isSubmitted}
+                        value={item.unitPrice ?? ''}
+                        onChange={(e) => handleItemChange(index, 'unitPrice', e.target.value)}
+                        className="w-full border rounded-lg px-2 py-2 text-sm text-right h-[38px] focus:outline-none focus:ring-1 focus:ring-blue-400 disabled:bg-zinc-50 disabled:text-zinc-600 bg-white"
+                      />
+                      <input
+                        type="number"
+                        min="0"
+                        step="0.01"
+                        disabled={isSubmitted}
+                        value={item.amount ?? ''}
+                        onChange={(e) => handleItemChange(index, 'amount', e.target.value)}
+                        className="w-full border rounded-lg px-2 py-2 text-sm text-right h-[38px] focus:outline-none focus:ring-1 focus:ring-blue-400 disabled:bg-zinc-50 disabled:text-zinc-600 bg-white"
+                      />
                       <div className="flex items-center justify-center gap-1">
                         <button
                           type="button"
